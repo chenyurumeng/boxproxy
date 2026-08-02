@@ -153,7 +153,7 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ipt_owned(&self, family: Family, args: Vec<String>) -> Result<()> {
-        self.flush_batch();
+        self.flush_batch()?;
         let full = self.with_wait(family, args);
         if self.runner.dry_run() {
             self.runner.preview(iptables_cmd(family), &full);
@@ -177,7 +177,7 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ipt_silent_owned(&self, family: Family, args: Vec<String>) {
-        self.flush_batch();
+        let _ = self.flush_batch();
         let full = self.with_wait(family, args);
         if self.runner.dry_run() {
             self.runner.preview(iptables_cmd(family), &full);
@@ -187,7 +187,9 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ipt_try_owned(&self, family: Family, args: Vec<String>) -> bool {
-        self.flush_batch();
+        if self.flush_batch().is_err() {
+            return false;
+        }
         let full = self.with_wait(family, args);
         if self.runner.dry_run() {
             self.runner.preview(iptables_cmd(family), &full);
@@ -201,7 +203,9 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ipt_check_owned(&self, family: Family, args: &[String]) -> bool {
-        self.flush_batch();
+        if self.flush_batch().is_err() {
+            return false;
+        }
         if self.runner.dry_run() {
             return false;
         }
@@ -210,13 +214,13 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ip_ignore(&self, family: Family, args: &[&str]) {
-        self.flush_batch();
+        let _ = self.flush_batch();
         let full = ip_args(family, args);
         self.runner.run_ignore("ip", &full);
     }
 
     pub(super) fn ip_required(&self, family: Family, args: &[&str]) -> Result<()> {
-        self.flush_batch();
+        self.flush_batch()?;
         let full = ip_args(family, args);
         let output = self.runner.run("ip", &full)?;
         if output.ok {
@@ -227,7 +231,7 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn ip_rule_output(&self, family: Family, args: &[&str]) -> Option<String> {
-        self.flush_batch();
+        self.flush_batch().ok()?;
         let full = ip_args(family, args);
         self.runner
             .run("ip", &full)

@@ -91,7 +91,10 @@ impl<'a> RuleManager<'a> {
         mut base_for_proto: impl FnMut(&str) -> Option<Vec<String>>,
     ) -> Result<()> {
         for proto in ["tcp", "udp"] {
-            if proto == "tcp" && (self.config.network_mode == "enhance" || !self.config.proxy_tcp) {
+            if proto == "tcp"
+                && (self.config.network_mode == crate::config::NetworkMode::Enhance
+                    || !self.config.proxy_tcp)
+            {
                 continue;
             }
             if proto == "udp" && !self.config.proxy_udp {
@@ -240,7 +243,7 @@ impl<'a> RuleManager<'a> {
                 logger::warn_key(
                     self.config,
                     LogKey::ProxyModeInvalid,
-                    &[arg("mode", &self.config.proxy_mode)],
+                    &[arg("mode", self.config.proxy_mode)],
                 );
                 self.append_local_protocol_rule(family, table, chain, "tcp", action, None)?;
                 self.append_local_protocol_rule(family, table, chain, "udp", action, None)?;
@@ -283,7 +286,8 @@ impl<'a> RuleManager<'a> {
                 self.append_redirect_dispatch_rule(family, chain, args)
             }
             ProxyAction::Mark => {
-                if proto == "tcp" && self.config.network_mode == "enhance" {
+                if proto == "tcp" && self.config.network_mode == crate::config::NetworkMode::Enhance
+                {
                     return Ok(());
                 }
                 args.extend([
@@ -322,7 +326,8 @@ impl<'a> RuleManager<'a> {
                 self.append_redirect_dispatch_rule(family, chain, args)
             }
             ProxyAction::Mark => {
-                if proto == "tcp" && self.config.network_mode == "enhance" {
+                if proto == "tcp" && self.config.network_mode == crate::config::NetworkMode::Enhance
+                {
                     return Ok(());
                 }
                 let mut args = args;

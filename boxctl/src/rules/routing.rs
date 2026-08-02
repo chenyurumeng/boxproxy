@@ -6,7 +6,7 @@ impl<'a> RuleManager<'a> {
         family: Family,
         capabilities: &Capabilities,
     ) -> Result<()> {
-        if self.config.network_mode == "enhance"
+        if self.config.network_mode == crate::config::NetworkMode::Enhance
             || !capabilities.socket_match
             || !self.tproxy_performance_chain_enabled(capabilities)
         {
@@ -63,7 +63,9 @@ impl<'a> RuleManager<'a> {
         let range = self.config.fake_ip6_range.trim();
         match action {
             ProxyAction::Tproxy => {
-                if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+                if self.config.network_mode != crate::config::NetworkMode::Enhance
+                    && self.config.proxy_tcp
+                {
                     self.append_tproxy_dispatch_rule(
                         family,
                         chain,
@@ -79,7 +81,9 @@ impl<'a> RuleManager<'a> {
                 }
             }
             ProxyAction::Mark => {
-                if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+                if self.config.network_mode != crate::config::NetworkMode::Enhance
+                    && self.config.proxy_tcp
+                {
                     self.ensure_rule_append(
                         family,
                         "mangle",
@@ -329,7 +333,6 @@ impl<'a> RuleManager<'a> {
         self.del_ip_rule_if_exists(family, FWMARK, TPROXY_TABLE, TPROXY_PREF);
         self.del_ip_route_local_default_if_exists(family, TPROXY_TABLE);
         self.ip_ignore(family, &["route", "flush", "table", TPROXY_TABLE]);
-        self.ip_ignore(family, &["rule", "del", "pref", TPROXY_PREF]);
     }
 
     pub(super) fn apply_tun_route_rules(&self, family: Family) -> Result<()> {

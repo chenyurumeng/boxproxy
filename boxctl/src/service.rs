@@ -125,7 +125,7 @@ fn start_inner(config: &Config, runner: &Runner) -> Result<()> {
         LogKey::ServiceStarted,
         &[arg("core", &config.bin_name), arg("pid", pid)],
     );
-    resource::apply(config, runner, pid)?;
+    resource::apply(config, pid)?;
     Ok(())
 }
 
@@ -241,6 +241,7 @@ fn clear_run_log(config: &Config) -> Result<()> {
 }
 
 fn validate_core(config: &Config) -> Result<()> {
+    crate::core_config::ensure_network_mode_supported(config)?;
     logger::debug_key(
         config,
         LogKey::CoreCheck,

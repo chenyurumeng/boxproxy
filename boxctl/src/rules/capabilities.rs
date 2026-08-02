@@ -94,8 +94,17 @@ impl<'a> RuleManager<'a> {
             bit(caps.restore4),
             bit(caps.restore6),
         );
-        let _ = fs::create_dir_all(&self.config.paths.state);
-        let _ = fs::write(self.capability_cache_path(), body);
+        let path = self.capability_cache_path();
+        if let Err(err) = crate::atomic_file::write_atomic(&path, body.as_bytes(), None) {
+            logger::warn_key(
+                self.config,
+                LogKey::RuntimeConfigReadFailed,
+                &[arg(
+                    "error",
+                    format!("save capability cache {} failed: {err}", path.display()),
+                )],
+            );
+        }
     }
 
     pub(super) fn probe_capabilities_raw(&self) -> Capabilities {

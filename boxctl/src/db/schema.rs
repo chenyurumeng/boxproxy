@@ -1,6 +1,6 @@
 use super::*;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
     let current: i64 = conn
@@ -30,7 +30,8 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
 fn migrate_schema(conn: &Connection, current: i64) -> Result<()> {
     if current < 1 {
         initialize_schema(conn)?;
-    } else {
+    }
+    if current < 2 {
         migrate_v2(conn)?;
     }
     Ok(())

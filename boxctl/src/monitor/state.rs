@@ -1,11 +1,9 @@
 use super::*;
 
-pub(super) fn save_wifi_state(config: &Config, observation: &WifiObservation) {
-    let _ = fs::create_dir_all(&config.paths.state);
-    let _ = fs::write(
-        config.paths.state.join("last_wifi_state"),
-        wifi_state_key(observation),
-    );
+pub(super) fn save_wifi_state(config: &Config, observation: &WifiObservation) -> Result<()> {
+    let path = config.paths.state.join("last_wifi_state");
+    crate::atomic_file::write_atomic(&path, wifi_state_key(observation).as_bytes(), None)
+        .map_err(|err| format!("save Wi-Fi state {} failed: {err}", path.display()))
 }
 
 pub(super) fn wifi_state_matches(config: &Config, observation: &WifiObservation) -> bool {

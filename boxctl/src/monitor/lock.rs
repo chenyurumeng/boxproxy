@@ -1,26 +1,5 @@
 use super::*;
-#[cfg(unix)]
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
-#[cfg(not(unix))]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(unix))]
-use std::time::{SystemTime, UNIX_EPOCH};
-
-#[cfg(not(unix))]
-static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-}
-
-#[cfg(unix)]
-const LOCK_EX: i32 = 2;
-#[cfg(unix)]
-const LOCK_NB: i32 = 4;
 
 pub(super) fn acquire_monitor_lock(config: &Config) -> Result<Option<MonitorLock>> {
     let path = monitor_lock_path(config);
@@ -70,14 +49,8 @@ pub(super) fn acquire_monitor_lock(config: &Config) -> Result<Option<MonitorLock
     Ok(Some(MonitorLock { _file: file }))
 }
 
-#[cfg(unix)]
 fn try_lock_exclusive(file: &fs::File) -> bool {
-    unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) == 0 }
-}
-
-#[cfg(not(unix))]
-fn try_lock_exclusive(_file: &fs::File) -> bool {
-    true
+    crate::platform::flock_exclusive(file, true).is_ok()
 }
 
 pub(super) fn monitor_lock_path(config: &Config) -> PathBuf {
@@ -122,27 +95,10 @@ fn process_environment_value(pid: u32, key: &str) -> Option<String> {
 }
 
 pub(super) fn generate_monitor_token() -> Result<String> {
-    #[cfg(unix)]
-    {
-        let mut bytes = [0_u8; 16];
-        fs::File::open("/dev/urandom")
-            .and_then(|mut file| file.read_exact(&mut bytes))
-            .map_err(|err| format!("read monitor token entropy failed: {err}"))?;
-        return Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect());
-    }
-
-    #[cfg(not(unix))]
-    {
-        let sequence = TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        Ok(format!(
-            "{now:032x}{:016x}",
-            process::id() as u64 ^ sequence
-        ))
-    }
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|err| format!("read monitor token entropy failed: {err}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn valid_monitor_token(token: &str) -> bool {

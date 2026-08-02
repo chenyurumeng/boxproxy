@@ -259,6 +259,7 @@ struct RawOptions {
 enum NetworkMode {
     Tun,
     Tproxy,
+    Ebpf,
     Redirect,
     Mixed,
     Enhance,
@@ -269,6 +270,7 @@ impl NetworkMode {
         match self {
             Self::Tun => "tun",
             Self::Tproxy => "tproxy",
+            Self::Ebpf => "ebpf",
             Self::Redirect => "redirect",
             Self::Mixed => "mixed",
             Self::Enhance => "enhance",

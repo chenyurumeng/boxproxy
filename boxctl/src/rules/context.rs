@@ -35,7 +35,7 @@ impl<'a> RuleManager<'a> {
             self.config,
             LogKey::RuleContext,
             &[
-                arg("mode", &self.config.network_mode),
+                arg("mode", self.config.network_mode),
                 arg("core", &self.config.bin_name),
                 logger::enabled_arg("tcp", self.config.proxy_tcp),
                 logger::enabled_arg("udp", self.config.proxy_udp),
@@ -44,7 +44,7 @@ impl<'a> RuleManager<'a> {
                 logger::enabled_arg("dns_tcp", self.config.dns_hijack_tcp),
                 logger::enabled_arg("dns_udp", self.config.dns_hijack_udp),
                 logger::enabled_arg("cnip", self.config.bypass_cn_ip),
-                arg("cnip_mode", &self.config.cnip_mode),
+                arg("cnip_mode", self.config.cnip_mode),
                 arg("uid", &context.box_uid),
                 arg("gid", &context.box_gid),
                 arg("uid_count", context.selected_uids.len()),
@@ -70,13 +70,13 @@ impl<'a> RuleManager<'a> {
 
         let reply_text = logger::performance_reply_arg(
             "reply",
-            &self.config.network_mode,
+            self.config.network_mode.as_str(),
             capabilities.conntrack_match,
         );
         let reasons = self.tproxy_performance_fallback_reasons(capabilities);
         let chain_text = logger::performance_chain_arg(
             "chain",
-            &self.config.network_mode,
+            self.config.network_mode.as_str(),
             self.tproxy_performance_chain_enabled(capabilities),
             &reasons,
         );
@@ -120,10 +120,13 @@ impl<'a> RuleManager<'a> {
         if !capabilities.connmark_target {
             reasons.push(logger::PerformanceFallbackReason::MissingConnmarkTarget);
         }
-        if self.config.network_mode != "enhance" && !capabilities.socket_transparent {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance
+            && !capabilities.socket_transparent
+        {
             reasons.push(logger::PerformanceFallbackReason::MissingSocketTransparent);
         }
-        if self.config.network_mode == "enhance" && !self.config.proxy_udp {
+        if self.config.network_mode == crate::config::NetworkMode::Enhance && !self.config.proxy_udp
+        {
             reasons.push(logger::PerformanceFallbackReason::UdpNotEnabled);
         }
         if reasons.is_empty() {

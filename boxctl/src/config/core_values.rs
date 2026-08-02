@@ -6,10 +6,18 @@ use jsonc_parser::ParseOptions;
 #[derive(Clone, Default)]
 pub(super) struct CoreConfigValues {
     pub(super) read_status: String,
+    pub(super) tproxy_port: Option<String>,
+    pub(super) redir_port: Option<String>,
     pub(super) mihomo_dns_port: Option<String>,
     pub(super) tun_device: Option<String>,
     pub(super) fake_ip_range: Option<String>,
     pub(super) fake_ip6_range: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ResolvedValue {
+    pub(super) value: String,
+    pub(super) source: &'static str,
 }
 
 impl CoreConfigValues {
@@ -59,6 +67,8 @@ impl CoreConfigValues {
         let dns = values.get("dns");
         Self {
             read_status: "read mihomo config".to_string(),
+            tproxy_port: values.get("tproxy-port").and_then(yaml_scalar_text),
+            redir_port: values.get("redir-port").and_then(yaml_scalar_text),
             mihomo_dns_port: dns
                 .and_then(|value| value.get("listen"))
                 .and_then(yaml_string)
@@ -100,6 +110,8 @@ impl CoreConfigValues {
             .and_then(serde_json::Value::as_array);
         Self {
             read_status: "read sing-box config".to_string(),
+            tproxy_port: sing_box_inbound_port(&values, "tproxy"),
+            redir_port: sing_box_inbound_port(&values, "redirect"),
             mihomo_dns_port: None,
             tun_device: if matches!(network_mode, "tun" | "mixed") {
                 values
@@ -130,47 +142,94 @@ impl CoreConfigValues {
     }
 }
 
+fn sing_box_inbound_port(values: &serde_json::Value, inbound_type: &str) -> Option<String> {
+    values
+        .get("inbounds")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|value| value.get("type").and_then(serde_json::Value::as_str) == Some(inbound_type))
+        .and_then(|value| value.get("listen_port"))
+        .and_then(json_scalar_text)
+}
+
+fn json_scalar_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 fn yaml_string(value: &serde_norway::Value) -> Option<&str> {
     value.as_str()
 }
 
-pub(super) fn value_source(
+fn yaml_scalar_text(value: &serde_norway::Value) -> Option<String> {
+    match value {
+        serde_norway::Value::String(value) => Some(value.clone()),
+        serde_norway::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+pub(super) fn resolve_value(
     override_value: &Option<String>,
     db_value: &Option<String>,
     core_value: &Option<String>,
     default_value: &str,
     applicable: bool,
-    prefer_db: bool,
-) -> &'static str {
+) -> ResolvedValue {
     if override_value
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
     {
-        return "CLI";
+        return ResolvedValue {
+            value: override_value
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            source: "CLI",
+        };
     }
     if core_value
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
     {
-        return "core config";
+        return ResolvedValue {
+            value: core_value.as_deref().unwrap_or_default().trim().to_string(),
+            source: "core config",
+        };
     }
-    if prefer_db
-        && db_value
-            .as_deref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+    if db_value
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
     {
-        return "App config";
+        return ResolvedValue {
+            value: db_value.as_deref().unwrap_or_default().trim().to_string(),
+            source: "App config",
+        };
     }
     if !applicable {
-        return "not applicable";
+        return ResolvedValue {
+            value: String::new(),
+            source: "not applicable",
+        };
     }
     if !default_value.trim().is_empty() {
-        return "default";
+        return ResolvedValue {
+            value: default_value.trim().to_string(),
+            source: "default",
+        };
     }
-    "unset"
+    ResolvedValue {
+        value: String::new(),
+        source: "unset",
+    }
 }
 
 pub(super) fn non_empty_value(value: &str) -> Option<String> {
@@ -248,5 +307,36 @@ mod tests {
         assert_eq!(values.mihomo_dns_port.as_deref(), Some("1053"));
         assert_eq!(values.fake_ip_range.as_deref(), Some("198.18.0.1/16"));
         assert_eq!(values.tun_device.as_deref(), Some("meta"));
+    }
+
+    #[test]
+    fn reads_core_network_endpoints() {
+        let mihomo = CoreConfigValues::read_mihomo(
+            "redir-port: 19092\ntproxy-port: 19093\ntun: { device: custom-tun }\n",
+            "tun",
+        );
+        assert_eq!(mihomo.redir_port.as_deref(), Some("19092"));
+        assert_eq!(mihomo.tproxy_port.as_deref(), Some("19093"));
+
+        let sing_box = CoreConfigValues::read_sing_box(
+            r#"{"inbounds":[{"type":"redirect","listen_port":18080},{"type":"tproxy","listen_port":"18081"}]}"#,
+            "tproxy",
+        );
+        assert_eq!(sing_box.redir_port.as_deref(), Some("18080"));
+        assert_eq!(sing_box.tproxy_port.as_deref(), Some("18081"));
+    }
+
+    #[test]
+    fn resolves_one_value_and_its_source_together() {
+        let app = Some("7893".to_string());
+        let core = Some("19093".to_string());
+        let resolved = resolve_value(&None, &app, &core, "7893", true);
+        assert_eq!(resolved.value, "19093");
+        assert_eq!(resolved.source, "core config");
+
+        let cli = Some("29093".to_string());
+        let resolved = resolve_value(&cli, &app, &core, "7893", true);
+        assert_eq!(resolved.value, "29093");
+        assert_eq!(resolved.source, "CLI");
     }
 }

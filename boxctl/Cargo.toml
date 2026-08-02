@@ -2,6 +2,7 @@
 name = "boxctl"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.97"
 
 [profile.release]
 lto = "thin"
@@ -11,8 +12,14 @@ strip = true
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+getrandom = "0.4.3"
 jsonc-parser = { version = "0.33.0", features = ["serde", "serde_json"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+libc = "0.2"
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_norway = "0.9.42"
 yaml-rust2 = "0.11.0"
+
+[target.'cfg(unix)'.dependencies]
+netlink-sys = "0.8.8"
+nix = { version = "0.31.3", features = ["process"] }

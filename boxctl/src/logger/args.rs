@@ -340,7 +340,7 @@ pub fn startup_args(config: &Config) -> Vec<LogArg> {
     vec![
         arg("workdir", config.paths.home.display()),
         arg("core", &config.bin_name),
-        arg("mode", &config.network_mode),
+        arg("mode", config.network_mode),
         arg("config", config.launch_config_path().display()),
         arg("tun", display_value(&config.tun_device)),
         arg("tproxy", display_value(&config.tproxy_port)),
@@ -349,7 +349,7 @@ pub fn startup_args(config: &Config) -> Vec<LogArg> {
         arg("dns_port", display_value(&config.mihomo_dns_port)),
         ipv6_mode_arg("ipv6", &config.ipv6_mode),
         enabled_arg("cnip", config.bypass_cn_ip),
-        arg("cnip_mode", &config.cnip_mode),
+        arg("cnip_mode", config.cnip_mode),
     ]
 }
 
@@ -365,6 +365,10 @@ pub fn core_config_args(config: &Config) -> Vec<LogArg> {
     vec![
         core_config_status_arg("status", &config.core_config_sources.read_status),
         arg("config", config.source_config_path().display()),
+        arg("tproxy", display_value(&config.tproxy_port)),
+        config_source_arg("tproxy_source", config.core_config_sources.tproxy_port),
+        arg("redir", display_value(&config.redir_port)),
+        config_source_arg("redir_source", config.core_config_sources.redir_port),
         arg("dns_port", display_value(&config.mihomo_dns_port)),
         config_source_arg(
             "dns_port_source",

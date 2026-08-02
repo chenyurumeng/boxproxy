@@ -30,9 +30,10 @@ impl<'a> RuleManager<'a> {
         *self.batch.borrow_mut() = Some(RuleBatch::new(family));
     }
 
-    pub(super) fn end_batch(&self) {
-        self.flush_batch();
+    pub(super) fn end_batch(&self) -> Result<()> {
+        let result = self.flush_batch();
         *self.batch.borrow_mut() = None;
+        result
     }
 
     pub(super) fn restore_supported(&self, family: Family) -> bool {
@@ -80,34 +81,38 @@ impl<'a> RuleManager<'a> {
         true
     }
 
-    pub(super) fn flush_batch(&self) {
+    pub(super) fn flush_batch(&self) -> Result<()> {
         let Some(mut batch) = self.batch.borrow_mut().take() else {
-            return;
+            return Ok(());
         };
         let family = batch.family;
 
-        for (table, tb) in batch.tables.iter_mut() {
-            if tb.decls.is_empty() && tb.appends.is_empty() {
-                continue;
-            }
-
-            let applied = self.run_restore(family, table, &tb.decls, &tb.appends);
-            if !applied {
-                for chain in &tb.decls {
-                    let _ = self.ensure_chain(family, table, chain);
+        let result = (|| {
+            for (table, tb) in batch.tables.iter_mut() {
+                if tb.decls.is_empty() && tb.appends.is_empty() {
+                    continue;
                 }
-                for (chain, args) in &tb.appends {
-                    let _ = self.ensure_rule_append_owned(family, table, chain, args.clone());
-                }
-            }
 
-            for chain in tb.decls.drain(..) {
-                tb.declared.insert(chain);
+                let applied = self.run_restore(family, table, &tb.decls, &tb.appends);
+                if !applied {
+                    for chain in &tb.decls {
+                        self.ensure_chain(family, table, chain)?;
+                    }
+                    for (chain, args) in &tb.appends {
+                        self.ensure_rule_append_owned(family, table, chain, args.clone())?;
+                    }
+                }
+
+                for chain in tb.decls.drain(..) {
+                    tb.declared.insert(chain);
+                }
+                tb.appends.clear();
             }
-            tb.appends.clear();
-        }
+            Ok(())
+        })();
 
         *self.batch.borrow_mut() = Some(batch);
+        result
     }
 
     fn run_restore(

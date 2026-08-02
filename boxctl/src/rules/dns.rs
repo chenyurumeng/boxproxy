@@ -211,7 +211,8 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn append_dns_return_rules(&self, family: Family, chain: &str) -> Result<()> {
-        if self.config.network_mode != "enhance" && self.dns_tcp_enabled() {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance && self.dns_tcp_enabled()
+        {
             self.ensure_rule_append(
                 family,
                 "mangle",
@@ -231,7 +232,9 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn append_dns_tproxy_rules(&self, family: Family, chain: &str) -> Result<()> {
-        if self.config.network_mode != "enhance" && self.dns_tcp_enabled() && self.config.proxy_tcp
+        if self.config.network_mode != crate::config::NetworkMode::Enhance
+            && self.dns_tcp_enabled()
+            && self.config.proxy_tcp
         {
             self.append_tproxy_dispatch_rule(
                 family,
@@ -250,7 +253,9 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn append_dns_mark_rules(&self, family: Family, chain: &str) -> Result<()> {
-        if self.config.network_mode != "enhance" && self.dns_tcp_enabled() && self.config.proxy_tcp
+        if self.config.network_mode != crate::config::NetworkMode::Enhance
+            && self.dns_tcp_enabled()
+            && self.config.proxy_tcp
         {
             self.ensure_rule_append(
                 family,

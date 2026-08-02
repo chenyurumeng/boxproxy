@@ -20,10 +20,13 @@ impl<'a> RuleManager<'a> {
         if !self.performance_connmark_enabled(capabilities) {
             return false;
         }
-        if self.config.network_mode != "enhance" && !capabilities.socket_transparent {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance
+            && !capabilities.socket_transparent
+        {
             return false;
         }
-        if self.config.network_mode == "enhance" && !self.config.proxy_udp {
+        if self.config.network_mode == crate::config::NetworkMode::Enhance && !self.config.proxy_udp
+        {
             return false;
         }
         true
@@ -376,7 +379,9 @@ impl<'a> RuleManager<'a> {
         targets: &[&str],
     ) -> Result<()> {
         for target in targets {
-            if self.config.proxy_tcp && (table != "mangle" || self.config.network_mode != "enhance")
+            if self.config.proxy_tcp
+                && (table != "mangle"
+                    || self.config.network_mode != crate::config::NetworkMode::Enhance)
             {
                 self.ensure_rule_append_owned(
                     family,
@@ -417,7 +422,8 @@ impl<'a> RuleManager<'a> {
         family: Family,
         chain: &str,
     ) -> Result<()> {
-        if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance && self.config.proxy_tcp
+        {
             self.ensure_rule_append(
                 family,
                 "mangle",

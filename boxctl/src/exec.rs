@@ -3,18 +3,20 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[cfg(unix)]
+pub const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+pub const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
 pub const SIGTERM: i32 = 15;
+#[cfg(not(unix))]
 pub const SIGKILL: i32 = 9;
 const CHILD_REAPER_STACK_SIZE: usize = 128 * 1024;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
 
 #[derive(Clone)]
 pub struct Runner {
@@ -88,7 +90,7 @@ impl Runner {
         if self.dry_run {
             return;
         }
-        send_signal(pid, sig);
+        let _ = crate::platform::send_signal(pid, sig);
     }
 
     pub fn preview<S: AsRef<str>>(&self, program: &str, args: &[S]) {
@@ -121,67 +123,44 @@ impl Runner {
             .spawn()
             .map_err(|err| command_start_error("execute", program, err))?;
 
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(input.as_bytes())
-                .map_err(|err| format!("write {program} stdin failed: {err}"))?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|err| format!("wait for {program} failed: {err}"))?;
-
-        Ok(Output {
-            ok: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        })
-    }
-
-    pub fn run_with_stdin_writer<S: AsRef<str>, F>(
-        &self,
-        program: &str,
-        args: &[S],
-        write_input: F,
-    ) -> Result<Output>
-    where
-        F: FnOnce(&mut dyn Write) -> Result<()>,
-    {
-        self.print_command(program, args);
-        if self.dry_run {
-            return Ok(Output {
-                ok: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            });
-        }
-
-        let mut child = Command::new(program)
-            .args(args.iter().map(|value| value.as_ref()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| command_start_error("execute", program, err))?;
-        let write_result = child
+        let stdin = child
             .stdin
-            .as_mut()
-            .ok_or_else(|| format!("open {program} stdin failed"))
-            .and_then(|stdin| write_input(stdin));
-        drop(child.stdin.take());
-        if let Err(err) = write_result {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(err);
-        }
+            .take()
+            .ok_or_else(|| format!("open {program} stdin failed"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("open {program} stdout failed"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("open {program} stderr failed"))?;
+        let input = input.as_bytes().to_vec();
+        let program_name = program.to_string();
 
-        let output = child
-            .wait_with_output()
+        // stdin, stdout, and stderr must make progress concurrently. A child
+        // which writes before consuming all stdin otherwise can deadlock on a
+        // full pipe while this process is still blocked in write_all.
+        let stdin_writer = thread::spawn(move || -> Result<()> {
+            let mut stdin = stdin;
+            stdin
+                .write_all(&input)
+                .map_err(|err| format!("write {program_name} stdin failed: {err}"))
+        });
+        let stdout_reader = thread::spawn(move || read_child_pipe(stdout, "stdout"));
+        let stderr_reader = thread::spawn(move || read_child_pipe(stderr, "stderr"));
+
+        let status = child
+            .wait()
             .map_err(|err| format!("wait for {program} failed: {err}"))?;
+        join_child_thread(stdin_writer, "stdin")?;
+        let stdout = join_child_thread(stdout_reader, "stdout")?;
+        let stderr = join_child_thread(stderr_reader, "stderr")?;
+
         Ok(Output {
-            ok: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ok: status.success(),
+            stdout: String::from_utf8_lossy(&stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
         })
     }
 
@@ -239,6 +218,19 @@ impl Runner {
     }
 }
 
+fn read_child_pipe(mut pipe: impl Read, stream: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)
+        .map_err(|err| format!("read child {stream} failed: {err}"))?;
+    Ok(bytes)
+}
+
+fn join_child_thread<T>(handle: thread::JoinHandle<Result<T>>, stream: &str) -> Result<T> {
+    handle
+        .join()
+        .map_err(|_| format!("child {stream} worker panicked"))?
+}
+
 #[cfg(unix)]
 fn apply_process_identity(command: &mut Command, uid: u32, gid: u32) {
     command.uid(uid).gid(gid);
@@ -246,21 +238,6 @@ fn apply_process_identity(command: &mut Command, uid: u32, gid: u32) {
 
 #[cfg(not(unix))]
 fn apply_process_identity(_command: &mut Command, _uid: u32, _gid: u32) {}
-
-#[cfg(unix)]
-fn send_signal(pid: i32, sig: i32) {
-    unsafe {
-        kill(pid, sig);
-    }
-}
-
-#[cfg(not(unix))]
-fn send_signal(pid: i32, sig: i32) {
-    let _ = Command::new("kill")
-        .arg(format!("-{sig}"))
-        .arg(pid.to_string())
-        .status();
-}
 
 fn command_start_error(action: &str, program: &str, err: io::Error) -> String {
     let diagnostics = executable_diagnostics(program);

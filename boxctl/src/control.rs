@@ -1,16 +1,26 @@
 use crate::config::Config;
 use crate::core_config;
 use crate::exec::Runner;
-use crate::{logger, monitor, rules, service, wifi, Result};
+use crate::{logger, monitor, rules, service, Result};
 use logger::{arg, LogKey};
 use std::thread;
+mod lock;
+use lock::OperationLock;
+
+pub(crate) fn with_operation_lock<T>(
+    config: &Config,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _lock = OperationLock::acquire(config)?;
+    operation()
+}
 
 pub fn up(config: &Config, runner: &Runner) -> Result<()> {
-    up_inner(config, runner, true)
+    with_operation_lock(config, || up_inner(config, runner, true))
 }
 
 pub(crate) fn up_from_monitor(config: &Config, runner: &Runner) -> Result<()> {
-    up_inner(config, runner, false)
+    with_operation_lock(config, || up_inner(config, runner, false))
 }
 
 fn up_inner(config: &Config, runner: &Runner, manage_monitor: bool) -> Result<()> {
@@ -19,7 +29,7 @@ fn up_inner(config: &Config, runner: &Runner, manage_monitor: bool) -> Result<()
         log_startup_failed(config, &err);
         return Err(err);
     }
-    
+
     let (service_result, rules_result) = thread::scope(|scope| {
         let rules_handle = scope.spawn(|| rules::apply(config, runner));
         let service_result = service::start(config, runner);
@@ -83,20 +93,20 @@ fn startup_failure_with_rollback(primary: &str, rollback_failures: &[String]) ->
 
 pub fn boot(config: &Config, runner: &Runner) -> Result<()> {
     if config.wifi_network_control_enabled {
-        wifi::apply(config, runner)?;
+        monitor::apply_wifi_policy(config, runner)?;
         monitor::run(config, runner)?;
         return Ok(());
     }
 
-    up(config, runner)
+    with_operation_lock(config, || up_inner(config, runner, true))
 }
 
 pub fn down(config: &Config, runner: &Runner) -> Result<()> {
-    down_inner(config, runner, true)
+    with_operation_lock(config, || down_inner(config, runner, true))
 }
 
 pub(crate) fn down_from_monitor(config: &Config, runner: &Runner) -> Result<()> {
-    down_inner(config, runner, false)
+    with_operation_lock(config, || down_inner(config, runner, false))
 }
 
 fn down_inner(config: &Config, runner: &Runner, manage_monitor: bool) -> Result<()> {
@@ -105,7 +115,7 @@ fn down_inner(config: &Config, runner: &Runner, manage_monitor: bool) -> Result<
         LogKey::StopBegin,
         &[
             arg("core", &config.bin_name),
-            arg("mode", &config.network_mode),
+            arg("mode", config.network_mode),
         ],
     );
 
@@ -126,16 +136,18 @@ fn down_inner(config: &Config, runner: &Runner, manage_monitor: bool) -> Result<
 }
 
 pub fn restart(config: &Config, runner: &Runner) -> Result<()> {
-    logger::warn_key(
-        config,
-        LogKey::RestartBegin,
-        &[
-            arg("core", &config.bin_name),
-            arg("mode", &config.network_mode),
-        ],
-    );
-    down_inner(config, runner, false)?;
-    up(config, runner)
+    with_operation_lock(config, || {
+        logger::warn_key(
+            config,
+            LogKey::RestartBegin,
+            &[
+                arg("core", &config.bin_name),
+                arg("mode", config.network_mode),
+            ],
+        );
+        down_inner(config, runner, false)?;
+        up_inner(config, runner, true)
+    })
 }
 
 pub fn status(config: &Config, runner: &Runner) -> Result<()> {
@@ -144,7 +156,7 @@ pub fn status(config: &Config, runner: &Runner) -> Result<()> {
         LogKey::StatusSummary,
         &[
             arg("core", &config.bin_name),
-            arg("mode", &config.network_mode),
+            arg("mode", config.network_mode),
             arg("tun", &config.tun_device),
             arg("tproxy", &config.tproxy_port),
             arg("redir", &config.redir_port),

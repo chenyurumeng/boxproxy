@@ -12,7 +12,7 @@ impl<'a> RuleManager<'a> {
             Some(mode)
                 if matches!(
                     mode.as_str(),
-                    "redirect" | "tproxy" | "mixed" | "enhance" | "tun"
+                    "redirect" | "tproxy" | "mixed" | "enhance" | "tun" | "ebpf"
                 ) =>
             {
                 mode
@@ -48,8 +48,8 @@ impl<'a> RuleManager<'a> {
                 .unwrap_or(true)
         }) {
             "all".to_string()
-        } else if old_mode == self.config.network_mode {
-            old_mode
+        } else if self.cleanup_mode_for_clear() == self.desired_cleanup_mode() {
+            self.cleanup_mode_for_clear()
         } else {
             "all".to_string()
         }
@@ -66,17 +66,18 @@ impl<'a> RuleManager<'a> {
             }
             "mixed" => {
                 self.stop_redirect(family);
-                self.forward(family, false).ok();
+                self.cleanup_forward(family);
             }
             "tun" => {
                 self.stop_tun_bypass(family);
-                self.forward(family, false).ok();
+                self.cleanup_forward(family);
             }
+            "ebpf" => return,
             _ => {
                 self.stop_redirect(family);
                 self.stop_tproxy(family);
                 self.stop_tun_bypass(family);
-                self.forward(family, false).ok();
+                self.cleanup_forward(family);
             }
         }
         if family == Family::V6 {
@@ -87,6 +88,24 @@ impl<'a> RuleManager<'a> {
                 &["-p", "udp", "--destination-port", "53", "-j", "DROP"],
             );
         }
+    }
+
+    pub(super) fn cleanup_forward(&self, family: Family) {
+        if let Err(err) = self.forward(family, false) {
+            logger::warn_key(
+                self.config,
+                LogKey::FamilyRuleFailed,
+                &[
+                    family_arg(family),
+                    logger::rule_kind_arg("kind", "forwarding cleanup"),
+                    arg("error", err),
+                ],
+            );
+        }
+    }
+
+    fn desired_cleanup_mode(&self) -> String {
+        self.config.network_mode.to_string()
     }
 
     pub(super) fn has_existing_box_rules(&self) -> bool {

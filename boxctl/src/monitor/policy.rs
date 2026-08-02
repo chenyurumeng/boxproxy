@@ -82,19 +82,16 @@ pub(super) fn refresh_connected_ip(runner: &Runner, observation: &mut WifiObserv
 pub(super) fn run_ip_monitor_once(config: &Config, runner: &Runner) -> Result<()> {
     let mut socket = open_route_event_socket()?;
     let (tx, rx) = mpsc::channel::<Result<()>>();
-    let reader_handle = thread::spawn(move || {
-        let mut buffer = [0_u8; 32 * 1024];
-        loop {
-            match wait_for_route_event(&mut socket, &mut buffer) {
-                Ok(()) => {
-                    if tx.send(Ok(())).is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.send(Err(err));
+    let reader_handle = thread::spawn(move || loop {
+        match wait_for_route_event(&mut socket) {
+            Ok(()) => {
+                if tx.send(Ok(())).is_err() {
                     break;
                 }
+            }
+            Err(err) => {
+                let _ = tx.send(Err(err));
+                break;
             }
         }
     });
@@ -237,10 +234,12 @@ pub(super) fn stop_service_if_needed(config: &Config, runner: &Runner) -> Result
 }
 
 pub(super) fn refresh_local_ip_rules_if_running(config: &Config, runner: &Runner) -> Result<()> {
-    if !service::is_running(config, runner) {
-        return Ok(());
-    }
-    rules::refresh_local_ip_rules(config, runner)
+    control::with_operation_lock(config, || {
+        if !service::is_running(config, runner) {
+            return Ok(());
+        }
+        rules::refresh_local_ip_rules(config, runner)
+    })
 }
 
 pub(super) fn should_enable_service(config: &Config, observation: &WifiObservation) -> bool {

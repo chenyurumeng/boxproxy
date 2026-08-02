@@ -19,6 +19,7 @@ const MANAGED_TUN_BEGIN: &str = "# boxctl managed tun begin";
 const MANAGED_TUN_END: &str = "# boxctl managed tun end";
 
 pub fn sync(config: &Config) -> Result<()> {
+    ensure_network_mode_supported(config)?;
     if !config.auto_sync_config {
         logger::info_key(config, LogKey::CoreConfigSyncDisabled, &[]);
     }
@@ -38,6 +39,13 @@ pub fn sync(config: &Config) -> Result<()> {
         }
         other => Err(format!("unknown core: {other}")),
     }
+}
+
+pub(crate) fn ensure_network_mode_supported(config: &Config) -> Result<()> {
+    if config.network_mode == crate::config::NetworkMode::Ebpf && config.bin_name != "sing-box" {
+        return Err("eBPF network mode is only supported by sing-box".to_string());
+    }
+    Ok(())
 }
 
 fn parse_yaml_runtime_value(text: &str, core: &str, source: &Path) -> Result<serde_norway::Value> {

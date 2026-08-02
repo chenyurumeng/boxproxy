@@ -29,11 +29,6 @@ use watcher::*;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn setsid() -> i32;
-}
-
 const WIFI_IP_RETRIES: usize = 3;
 const WIFI_IP_RETRY_DELAY_MS: u64 = 500;
 const WIFI_EVENT_DEBOUNCE_MS: u64 = 600;
@@ -78,7 +73,7 @@ pub fn apply_wifi_policy(config: &Config, runner: &Runner) -> Result<()> {
     let observation = current_observation(runner);
     let result = apply_network_control_policy(config, runner, observation)?;
     if result.handled {
-        save_wifi_state(config, &result.observation);
+        save_wifi_state(config, &result.observation)?;
     }
     Ok(())
 }

@@ -8,52 +8,14 @@ pub(crate) fn timestamp() -> String {
     format_unix_time(seconds as i64)
 }
 
-#[cfg(target_family = "unix")]
 fn format_unix_time(seconds: i64) -> String {
-    use std::mem::MaybeUninit;
-    use std::os::raw::{c_char, c_int, c_long};
-
-    #[repr(C)]
-    struct Tm {
-        tm_sec: c_int,
-        tm_min: c_int,
-        tm_hour: c_int,
-        tm_mday: c_int,
-        tm_mon: c_int,
-        tm_year: c_int,
-        tm_wday: c_int,
-        tm_yday: c_int,
-        tm_isdst: c_int,
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        tm_gmtoff: c_long,
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        tm_zone: *const c_char,
-    }
-
-    extern "C" {
-        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
-    }
-
-    let mut tm = MaybeUninit::<Tm>::uninit();
-    let ok = unsafe { !localtime_r(&seconds, tm.as_mut_ptr()).is_null() };
-    if ok {
-        let tm = unsafe { tm.assume_init() };
+    if let Some(tm) = crate::platform::local_time(seconds) {
         return format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec
+            tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second
         );
     }
 
-    format_unix_time_utc(seconds)
-}
-
-#[cfg(not(target_family = "unix"))]
-fn format_unix_time(seconds: i64) -> String {
     format_unix_time_utc(seconds)
 }
 

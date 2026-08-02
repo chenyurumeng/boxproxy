@@ -38,7 +38,7 @@ pub(super) fn monitor_required(config: &Config, runner: &Runner) -> bool {
         return true;
     }
 
-    service::is_running(config, runner) && config.network_mode != "tun"
+    service::is_running(config, runner) && config.network_mode != crate::config::NetworkMode::Tun
 }
 
 pub(super) fn monitor_worker_running(config: &Config) -> bool {
@@ -146,10 +146,9 @@ pub(super) fn spawn_monitor_worker(config: &Config) -> Result<()> {
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
-            if setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(std::io::Error::from)
         });
     }
 
@@ -170,7 +169,7 @@ pub(super) fn handle_network_change(
     if state_changed {
         let result = apply_network_control_policy(live_config, runner, observation)?;
         if result.handled {
-            save_wifi_state(live_config, &result.observation);
+            save_wifi_state(live_config, &result.observation)?;
         }
     }
 

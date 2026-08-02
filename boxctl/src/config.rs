@@ -4,7 +4,11 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 mod core_values;
+mod types;
+mod validation;
 use core_values::*;
+pub use types::{CnipMode, NetworkMode, ProxyMode};
+use validation::*;
 
 #[derive(Clone, Debug)]
 pub struct BoxPaths {
@@ -66,8 +70,8 @@ pub struct Config {
     pub bpf_matcher_path: PathBuf,
     pub bin_log: PathBuf,
     pub auto_sync_config: bool,
-    pub network_mode: String,
-    pub proxy_mode: String,
+    pub network_mode: NetworkMode,
+    pub proxy_mode: ProxyMode,
     pub tproxy_port: String,
     pub redir_port: String,
     pub ipv6_mode: String,
@@ -89,7 +93,7 @@ pub struct Config {
     pub cgroup_blkio: bool,
     pub weight: String,
     pub bypass_cn_ip: bool,
-    pub cnip_mode: String,
+    pub cnip_mode: CnipMode,
     pub bypass_cn_ip_v4: bool,
     pub bypass_cn_ip_v6: bool,
     pub cn_ip_file: PathBuf,
@@ -108,8 +112,6 @@ pub struct Config {
     pub fake_ip_range: String,
     pub fake_ip6_range: String,
     pub core_config_sources: CoreConfigSources,
-    pub tun_force_proxy_cidrs: Vec<String>,
-    pub tun_force_proxy_cidrs6: Vec<String>,
     pub gid_list: Vec<String>,
     pub hotspot_ap_interfaces: Vec<String>,
     pub blocked_interfaces: Vec<String>,
@@ -172,70 +174,95 @@ impl Config {
                 (db_config_name, path)
             }
         };
-        let network_mode = overrides
-            .network_mode
-            .clone()
-            .unwrap_or_else(|| db_data.mode.clone());
+        let network_mode = NetworkMode::parse(
+            &overrides
+                .network_mode
+                .clone()
+                .unwrap_or_else(|| db_data.mode.clone()),
+        )?;
+        let proxy_mode = ProxyMode::parse(
+            &overrides
+                .proxy_mode
+                .clone()
+                .unwrap_or_else(|| db_data.proxy_mode.clone()),
+        )?;
         let default_mihomo_dns_port = default_mihomo_dns_port(&bin_name);
-        let default_tun_device = default_tun_device(&bin_name, &network_mode);
+        let default_tun_device = default_tun_device(&bin_name, network_mode.as_str());
+        let default_tproxy_port = "7893".to_string();
+        let default_redir_port = "7892".to_string();
+        let db_tproxy_port = non_empty_value(&db_data.tproxy_port);
+        let db_redir_port = non_empty_value(&db_data.redir_port);
         let default_fake_ip_range = default_fake_ip_range(&bin_name);
         let default_fake_ip6_range = default_fake_ip6_range(&bin_name);
         let db_mihomo_dns_port = non_empty_value(&db_data.mihomo_dns_port);
         let db_tun_device = non_empty_value(&db_data.tun_device);
         let db_fake_ip_range = non_empty_value(&db_data.fake_ip_range);
         let db_fake_ip6_range = non_empty_value(&db_data.fake_ip6_range);
-        let core_values = if core_config_values_needed(
-            &bin_name,
-            &network_mode,
-            auto_sync_config,
-            &overrides,
-            &db_data,
-        ) {
-            CoreConfigValues::read(&bin_name, &network_mode, &source_config_path)
+        let core_values = if core_config_values_needed(&bin_name) {
+            CoreConfigValues::read(&bin_name, network_mode.as_str(), &source_config_path)
         } else {
             CoreConfigValues::skipped()
         };
+        let resolved_tproxy_port = resolve_value(
+            &overrides.tproxy_port,
+            &db_tproxy_port,
+            &core_values.tproxy_port,
+            &default_tproxy_port,
+            matches!(network_mode, NetworkMode::Tproxy | NetworkMode::Enhance),
+        );
+        let resolved_redir_port = resolve_value(
+            &overrides.redir_port,
+            &db_redir_port,
+            &core_values.redir_port,
+            &default_redir_port,
+            matches!(
+                network_mode,
+                NetworkMode::Redirect | NetworkMode::Mixed | NetworkMode::Enhance
+            ),
+        );
+        let resolved_mihomo_dns_port = resolve_value(
+            &overrides.mihomo_dns_port,
+            &db_mihomo_dns_port,
+            &core_values.mihomo_dns_port,
+            &default_mihomo_dns_port,
+            bin_name == "mihomo",
+        );
+        let resolved_tun_device = resolve_value(
+            &overrides.tun_device,
+            &db_tun_device,
+            &core_values.tun_device,
+            &default_tun_device,
+            network_mode.uses_tun(),
+        );
+        let resolved_fake_ip_range = resolve_value(
+            &overrides.fake_ip_range,
+            &db_fake_ip_range,
+            &core_values.fake_ip_range,
+            &default_fake_ip_range,
+            matches!(bin_name.as_str(), "mihomo" | "sing-box"),
+        );
+        let resolved_fake_ip6_range = resolve_value(
+            &overrides.fake_ip6_range,
+            &db_fake_ip6_range,
+            &core_values.fake_ip6_range,
+            &default_fake_ip6_range,
+            matches!(bin_name.as_str(), "mihomo" | "sing-box"),
+        );
         let sources = CoreConfigSources {
             read_status: core_values.read_status.clone(),
-            mihomo_dns_port: value_source(
-                &overrides.mihomo_dns_port,
-                &db_mihomo_dns_port,
-                &core_values.mihomo_dns_port,
-                &default_mihomo_dns_port,
-                bin_name == "mihomo",
-                auto_sync_config,
-            ),
-            tun_device: value_source(
-                &overrides.tun_device,
-                &db_tun_device,
-                &core_values.tun_device,
-                &default_tun_device,
-                matches!(network_mode.as_str(), "tun" | "mixed"),
-                auto_sync_config,
-            ),
-            fake_ip_range: value_source(
-                &overrides.fake_ip_range,
-                &db_fake_ip_range,
-                &core_values.fake_ip_range,
-                &default_fake_ip_range,
-                matches!(bin_name.as_str(), "mihomo" | "sing-box"),
-                auto_sync_config,
-            ),
-            fake_ip6_range: value_source(
-                &overrides.fake_ip6_range,
-                &db_fake_ip6_range,
-                &core_values.fake_ip6_range,
-                &default_fake_ip6_range,
-                matches!(bin_name.as_str(), "mihomo" | "sing-box"),
-                auto_sync_config,
-            ),
+            tproxy_port: resolved_tproxy_port.source,
+            redir_port: resolved_redir_port.source,
+            mihomo_dns_port: resolved_mihomo_dns_port.source,
+            tun_device: resolved_tun_device.source,
+            fake_ip_range: resolved_fake_ip_range.source,
+            fake_ip6_range: resolved_fake_ip6_range.source,
         };
 
         let performance_mode = overrides
             .performance_mode
             .unwrap_or(db_data.performance_mode);
-        let cnip_mode = normalize_cnip_mode(&db_data.cnip_mode);
-        let config = Self {
+        let cnip_mode = CnipMode::from_storage(&db_data.cnip_mode);
+        let mut config = Self {
             paths: paths.clone(),
             log_language: normalize_log_language(&db_data.log_language),
             box_pid: paths.run.join("box.pid"),
@@ -254,18 +281,9 @@ impl Config {
             bin_log: paths.run.join(format!("{bin_name}.log")),
             auto_sync_config,
             network_mode,
-            proxy_mode: overrides
-                .proxy_mode
-                .clone()
-                .unwrap_or_else(|| db_data.proxy_mode.clone()),
-            tproxy_port: overrides
-                .tproxy_port
-                .clone()
-                .unwrap_or_else(|| db_data.tproxy_port.clone()),
-            redir_port: overrides
-                .redir_port
-                .clone()
-                .unwrap_or_else(|| db_data.redir_port.clone()),
+            proxy_mode,
+            tproxy_port: resolved_tproxy_port.value,
+            redir_port: resolved_redir_port.value,
             ipv6_mode: normalize_ipv6_mode(
                 overrides.ipv6_mode.as_deref().unwrap_or(&db_data.ipv6_mode),
             ),
@@ -283,19 +301,7 @@ impl Config {
                 .mihomo_dns_forward
                 .clone()
                 .unwrap_or_else(|| db_data.mihomo_dns_forward.clone()),
-            mihomo_dns_port: overrides
-                .mihomo_dns_port
-                .clone()
-                .or_else(|| {
-                    if auto_sync_config {
-                        db_mihomo_dns_port
-                            .clone()
-                            .or_else(|| core_values.mihomo_dns_port.clone())
-                    } else {
-                        core_values.mihomo_dns_port.clone()
-                    }
-                })
-                .unwrap_or(default_mihomo_dns_port),
+            mihomo_dns_port: resolved_mihomo_dns_port.value,
             quic: overrides
                 .quic
                 .clone()
@@ -342,48 +348,10 @@ impl Config {
             wifi_list_mode: db_data.wifi_list_mode,
             wifi_ssids: db_data.wifi_ssids,
             wifi_bssids: db_data.wifi_bssids,
-            tun_device: overrides
-                .tun_device
-                .clone()
-                .or_else(|| {
-                    if auto_sync_config {
-                        db_tun_device
-                            .clone()
-                            .or_else(|| core_values.tun_device.clone())
-                    } else {
-                        core_values.tun_device.clone()
-                    }
-                })
-                .unwrap_or(default_tun_device),
-            fake_ip_range: overrides
-                .fake_ip_range
-                .clone()
-                .or_else(|| {
-                    if auto_sync_config {
-                        db_fake_ip_range
-                            .clone()
-                            .or_else(|| core_values.fake_ip_range.clone())
-                    } else {
-                        core_values.fake_ip_range.clone()
-                    }
-                })
-                .unwrap_or(default_fake_ip_range),
-            fake_ip6_range: overrides
-                .fake_ip6_range
-                .clone()
-                .or_else(|| {
-                    if auto_sync_config {
-                        db_fake_ip6_range
-                            .clone()
-                            .or_else(|| core_values.fake_ip6_range.clone())
-                    } else {
-                        core_values.fake_ip6_range.clone()
-                    }
-                })
-                .unwrap_or(default_fake_ip6_range),
+            tun_device: resolved_tun_device.value,
+            fake_ip_range: resolved_fake_ip_range.value,
+            fake_ip6_range: resolved_fake_ip6_range.value,
             core_config_sources: sources,
-            tun_force_proxy_cidrs: Vec::new(),
-            tun_force_proxy_cidrs6: Vec::new(),
             hotspot_ap_interfaces: db_data.hotspot_ap_interfaces,
             blocked_interfaces: db_data.blocked_interfaces,
             mac_filter: db_data.mac_filter,
@@ -396,6 +364,7 @@ impl Config {
             source_config_path,
         };
 
+        config.normalize_and_validate()?;
         Ok(config)
     }
 
@@ -421,6 +390,50 @@ impl Config {
         } else {
             self.source_config_path()
         }
+    }
+
+    fn normalize_and_validate(&mut self) -> Result<()> {
+        self.bin_name = normalize_choice(
+            "core",
+            &self.bin_name,
+            &["mihomo", "sing-box", "xray", "v2fly", "hysteria"],
+        )?;
+        self.dns_hijack_mode = normalize_choice(
+            "DNS hijack mode",
+            &self.dns_hijack_mode,
+            &["disable", "tproxy", "redirect"],
+        )?;
+        self.quic = normalize_choice("QUIC mode", &self.quic, &["enable", "disable"])?;
+        self.mihomo_dns_forward = normalize_choice(
+            "Mihomo DNS forwarding",
+            &self.mihomo_dns_forward,
+            &["enable", "disable"],
+        )?;
+        self.mac_mode = normalize_choice(
+            "hotspot MAC mode",
+            &self.mac_mode,
+            &["whitelist", "blacklist"],
+        )?;
+        self.tproxy_port = normalize_port("TPROXY port", &self.tproxy_port)?;
+        self.redir_port = normalize_port("REDIRECT port", &self.redir_port)?;
+        self.mihomo_dns_port = normalize_optional_port("Mihomo DNS port", &self.mihomo_dns_port)?;
+        self.tun_device = normalize_optional_interface("TUN device", &self.tun_device)?;
+        self.hotspot_ap_interfaces =
+            normalize_interface_list("hotspot interface", &self.hotspot_ap_interfaces)?;
+        self.blocked_interfaces =
+            normalize_interface_list("blocked interface", &self.blocked_interfaces)?;
+        self.fake_ip_range =
+            normalize_optional_cidr("Fake-IP IPv4 range", &self.fake_ip_range, false)?;
+        self.fake_ip6_range =
+            normalize_optional_cidr("Fake-IP IPv6 range", &self.fake_ip6_range, true)?;
+        self.intranet_cidrs4 =
+            normalize_cidr_list("intranet IPv4 CIDR", &self.intranet_cidrs4, false)?;
+        self.intranet_cidrs6 =
+            normalize_cidr_list("intranet IPv6 CIDR", &self.intranet_cidrs6, true)?;
+        self.selected_uids = normalize_numeric_list(&self.selected_uids);
+        self.gid_list = normalize_numeric_list(&self.gid_list);
+        self.cnip_force_uids = normalize_numeric_list(&self.cnip_force_uids);
+        Ok(())
     }
 }
 
@@ -460,34 +473,37 @@ mod tests {
         assert!(!core_uses_runtime_config("xray"));
         assert!(!core_uses_runtime_config("v2fly"));
     }
-}
 
-fn core_config_values_needed(
-    bin_name: &str,
-    network_mode: &str,
-    auto_sync_config: bool,
-    overrides: &ConfigOverrides,
-    db_data: &db::RuntimeData,
-) -> bool {
-    if !auto_sync_config {
-        return true;
+    #[test]
+    fn normalizes_ports_and_rejects_invalid_values() {
+        assert_eq!(normalize_port("port", " 09898 ").unwrap(), "9898");
+        assert!(normalize_port("port", "0").is_err());
+        assert!(normalize_port("port", "53\n-A OUTPUT").is_err());
     }
 
-    let value_missing = |override_value: &Option<String>, db_value: &str| {
-        override_value.is_none() && db_value.trim().is_empty()
-    };
-    let tun_relevant = matches!(network_mode, "tun" | "mixed");
-    let fake_ip_relevant = matches!(bin_name, "mihomo" | "sing-box");
+    #[test]
+    fn validates_interfaces_and_ip_ranges_before_rule_generation() {
+        assert_eq!(
+            normalize_optional_interface("interface", " wlan2 ").unwrap(),
+            "wlan2"
+        );
+        assert!(normalize_optional_interface("interface", "wlan2 -j ACCEPT").is_err());
+        assert!(normalize_optional_interface("interface", "wlan2\n-A OUTPUT").is_err());
+        assert!(normalize_optional_cidr("CIDR", "198.18.0.1/16", false).is_ok());
+        assert!(normalize_optional_cidr("CIDR", "198.18.0.1/64", false).is_err());
+        assert!(normalize_optional_cidr("CIDR", "198.18.0.1 -j ACCEPT", false).is_err());
+    }
+}
 
-    (bin_name == "mihomo" && value_missing(&overrides.mihomo_dns_port, &db_data.mihomo_dns_port))
-        || (tun_relevant && value_missing(&overrides.tun_device, &db_data.tun_device))
-        || (fake_ip_relevant && value_missing(&overrides.fake_ip_range, &db_data.fake_ip_range))
-        || (fake_ip_relevant && value_missing(&overrides.fake_ip6_range, &db_data.fake_ip6_range))
+fn core_config_values_needed(bin_name: &str) -> bool {
+    matches!(bin_name, "mihomo" | "sing-box")
 }
 
 #[derive(Clone, Debug)]
 pub struct CoreConfigSources {
     pub read_status: String,
+    pub tproxy_port: &'static str,
+    pub redir_port: &'static str,
     pub mihomo_dns_port: &'static str,
     pub tun_device: &'static str,
     pub fake_ip_range: &'static str,
@@ -516,12 +532,5 @@ pub fn normalize_ipv6_mode(value: &str) -> String {
         "enable" | "enabled" | "true" | "1" => "enable".to_string(),
         "disable" | "disabled" | "system_disable" | "off" => "disable".to_string(),
         _ => "bypass".to_string(),
-    }
-}
-
-pub fn normalize_cnip_mode(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "ebpf" => "ebpf".to_string(),
-        _ => "ipset".to_string(),
     }
 }

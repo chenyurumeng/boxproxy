@@ -25,7 +25,6 @@ pub(super) fn normalize_cidr(family: Family, value: &str) -> Option<String> {
         Family::V4 => normalize_ipv4_cidr(value),
         Family::V6 => normalize_ipv6_cidr(value),
     }
-    .or_else(|| Some(value.to_string()))
 }
 
 pub(super) fn normalize_ipv4_cidr(value: &str) -> Option<String> {

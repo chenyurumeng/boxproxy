@@ -96,7 +96,9 @@ impl<'a> RuleManager<'a> {
                                 )?;
                             }
                             ProxyAction::Tproxy => {
-                                if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+                                if self.config.network_mode != crate::config::NetworkMode::Enhance
+                                    && self.config.proxy_tcp
+                                {
                                     self.ensure_rule_append_owned(
                                         family,
                                         table,
@@ -174,7 +176,9 @@ impl<'a> RuleManager<'a> {
                 }
             }
             ProxyAction::Tproxy => {
-                if self.config.proxy_tcp && self.config.network_mode != "enhance" {
+                if self.config.proxy_tcp
+                    && self.config.network_mode != crate::config::NetworkMode::Enhance
+                {
                     self.append_tproxy_dispatch_rule(
                         family,
                         chain,
@@ -229,7 +233,9 @@ impl<'a> RuleManager<'a> {
             }
             ProxyAction::Tproxy => {
                 if proto == "tcp" {
-                    if !self.config.proxy_tcp || self.config.network_mode == "enhance" {
+                    if !self.config.proxy_tcp
+                        || self.config.network_mode == crate::config::NetworkMode::Enhance
+                    {
                         return Ok(());
                     }
                 } else if !self.config.proxy_udp {

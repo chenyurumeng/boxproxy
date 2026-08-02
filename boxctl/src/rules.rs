@@ -13,12 +13,14 @@ mod exec;
 mod external;
 mod local_ip;
 mod local_proxy;
+mod model;
 mod performance;
 mod routing;
 mod runtime;
 mod tun;
 mod util;
 mod vendor_firewall;
+use model::*;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
 use std::fs;
@@ -52,74 +54,8 @@ const EBPF_MAP6: &str = "/sys/fs/bpf/box/box_cidr6_lpm";
 const EBPF_FORCE_UID_MAP: &str = "/sys/fs/bpf/box/box_force_uid_set";
 const EBPF_APP_UID_MAP: &str = "/sys/fs/bpf/box/box_app_uid_set";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Family {
-    V4,
-    V6,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProxyAction {
-    Redirect,
-    Tproxy,
-    Mark,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DnsNatKind {
-    Hijack,
-    Forward,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EbpfApplyMode {
-    Start,
-    UpdateThenStart,
-}
-
-#[derive(Clone, Debug)]
-struct RuleContext {
-    box_uid: String,
-    box_gid: String,
-    selected_uids: Vec<String>,
-    selected_gids: Vec<String>,
-    cnip_force_uids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Capabilities {
-    tproxy4: bool,
-    tproxy6: bool,
-    socket_match: bool,
-    socket_transparent: bool,
-    addrtype: bool,
-    conntrack_match: bool,
-    connmark_match: bool,
-    connmark_target: bool,
-    ipset: bool,
-    bpf_match: bool,
-    ip6_nat: bool,
-    restore4: bool,
-    restore6: bool,
-}
-
-struct RuleManager<'a> {
-    config: &'a Config,
-    runner: &'a Runner,
-    capabilities: OnceCell<Capabilities>,
-    addrtype_v4_fallback_warned: OnceCell<()>,
-    addrtype_v6_fallback_warned: OnceCell<()>,
-    batch: RefCell<Option<batch::RuleBatch>>,
-    wait_support_v4: OnceCell<bool>,
-    wait_support_v6: OnceCell<bool>,
-    bypass_subnets_v4: OnceCell<Vec<String>>,
-    bypass_subnets_v6: OnceCell<Vec<String>>,
-    local_cidrs_v4: OnceCell<Vec<String>>,
-    local_cidrs_v6: OnceCell<Vec<String>>,
-    local_ip_chains_built: RefCell<HashSet<(Family, String)>>,
-}
-
 pub fn apply(config: &Config, runner: &Runner) -> Result<()> {
+    crate::core_config::ensure_network_mode_supported(config)?;
     RuleManager::new(config, runner).apply()
 }
 
@@ -128,6 +64,7 @@ pub fn clear(config: &Config, runner: &Runner) -> Result<()> {
 }
 
 pub fn renew(config: &Config, runner: &Runner) -> Result<()> {
+    crate::core_config::ensure_network_mode_supported(config)?;
     let manager = RuleManager::new(config, runner);
     manager.clear()?;
     manager.apply()
@@ -164,6 +101,10 @@ impl<'a> RuleManager<'a> {
         fs::create_dir_all(&self.config.paths.state)
             .map_err(|err| format!("create state directory failed: {err}"))?;
 
+        if self.config.network_mode == crate::config::NetworkMode::Ebpf {
+            return self.apply_ebpf();
+        }
+
         let context = self.prepare_context();
         let capabilities = self.probe_capabilities();
         logger::info_key(
@@ -193,7 +134,7 @@ impl<'a> RuleManager<'a> {
             self.config,
             LogKey::InboundRulesApplied,
             &[
-                arg("mode", &self.config.network_mode),
+                arg("mode", self.config.network_mode),
                 arg("core", &self.config.bin_name),
             ],
         );
@@ -205,10 +146,17 @@ impl<'a> RuleManager<'a> {
             self.config,
             LogKey::InboundRulesClearing,
             &[
-                arg("mode", &self.config.network_mode),
+                arg("mode", self.config.network_mode),
                 arg("core", &self.config.bin_name),
             ],
         );
+        let cleanup_mode = self.cleanup_mode_for_clear();
+        if cleanup_mode == "ebpf" {
+            self.runtime_clear()?;
+            logger::warn_key(self.config, LogKey::InboundRulesCleared, &[]);
+            return Ok(());
+        }
+
         self.ipv6_enable();
         // Tear down only the mode that was actually applied (recorded in the
         // runtime snapshot) instead of every mode. Cleaning all of
@@ -216,11 +164,29 @@ impl<'a> RuleManager<'a> {
         // forking iptables to delete chains that do not exist, which made stop
         // noticeably slower than start. Fall back to "all" when the mode is
         // unknown (missing snapshot / legacy state) so nothing is ever left behind.
-        self.cleanup_iptables_for_mode(&self.cleanup_mode_for_clear());
+        self.cleanup_iptables_for_mode(&cleanup_mode);
         self.cleanup_rule_ebpf();
         self.cleanup_cn_ipset_keep();
-        self.runtime_clear();
+        self.runtime_clear()?;
         logger::warn_key(self.config, LogKey::InboundRulesCleared, &[]);
+        Ok(())
+    }
+
+    fn apply_ebpf(&self) -> Result<()> {
+        let cleanup_mode = self.cleanup_mode_for_apply();
+        self.cleanup_iptables_for_mode(&cleanup_mode);
+        if cleanup_mode != "none" && cleanup_mode != "ebpf" {
+            self.cleanup_rule_ebpf();
+        }
+        self.runtime_save()?;
+        logger::info_key(
+            self.config,
+            LogKey::InboundRulesApplied,
+            &[
+                arg("mode", self.config.network_mode),
+                arg("core", &self.config.bin_name),
+            ],
+        );
         Ok(())
     }
 
@@ -232,15 +198,17 @@ impl<'a> RuleManager<'a> {
         // same applied state the per-rule path would have left behind.
         self.begin_batch(Family::V4);
         let v4 = per_family(Family::V4);
-        self.end_batch();
+        let v4_batch = self.end_batch();
         v4?;
+        v4_batch?;
 
         if self.config.ipv6 {
             self.ipv6_enable();
             self.begin_batch(Family::V6);
             let v6 = per_family(Family::V6);
-            self.end_batch();
+            let v6_batch = self.end_batch();
             v6?;
+            v6_batch?;
         } else {
             self.apply_ipv6_system_mode();
         }
@@ -413,7 +381,7 @@ impl<'a> RuleManager<'a> {
 
     fn apply_tun_family(&self, family: Family, context: &RuleContext) -> Result<()> {
         if let Err(err) = self.forward(family, true) {
-            self.forward(family, false).ok();
+            self.cleanup_forward(family);
             return Err(format!(
                 "{} TUN forwarding rule creation failed: {err}",
                 family_label(family)
@@ -451,7 +419,7 @@ impl<'a> RuleManager<'a> {
             }
             Err(err) => {
                 self.stop_tun_bypass(family);
-                self.forward(family, false).ok();
+                self.cleanup_forward(family);
                 let rule_label = if self.config.bypass_cn_ip {
                     "TUN CNIP bypass"
                 } else {
@@ -511,7 +479,7 @@ impl<'a> RuleManager<'a> {
         self.setup_tproxy_divert_chain(family, capabilities)?;
         self.apply_quic_block_rules(family);
 
-        if self.config.network_mode != "enhance" {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance {
             self.apply_loopback_reject_rule(family, &self.config.tproxy_port, context);
         }
 
@@ -549,13 +517,11 @@ impl<'a> RuleManager<'a> {
         )?;
         self.append_tun_external_interface_policy_rules(family, pre_chain)?;
         self.append_tun_dns_rules(family, pre_chain)?;
-        self.append_tun_force_proxy_destination_rules(family, pre_chain)?;
         self.append_tun_bypass_destination_rules(family, pre_chain)?;
 
         self.append_tun_core_bypass_rules(family, out_chain, context);
         self.append_tun_dns_rules(family, out_chain)?;
         self.append_cnip_force_proxy_tun_rules(family, out_chain, context)?;
-        self.append_tun_force_proxy_destination_rules(family, out_chain)?;
         self.append_tun_proxy_mode_rules(family, out_chain, context)?;
         self.append_tun_bypass_destination_rules(family, out_chain)?;
 
@@ -659,7 +625,8 @@ impl<'a> RuleManager<'a> {
         self.add_perf_chain_jumps(family, "mangle", "BOX_EXTERNAL", &[ip_chain, if_chain])?;
         self.append_tproxy_perf_connmark_rules(family, "BOX_EXTERNAL")?;
 
-        if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance && self.config.proxy_tcp
+        {
             self.append_tproxy_dispatch_rule(
                 family,
                 "BOX_EXTERNAL",
@@ -712,7 +679,8 @@ impl<'a> RuleManager<'a> {
         self.apply_mangle_dns_rules(family, "BOX_LOCAL", ProxyAction::Mark)?;
         self.append_tproxy_perf_connmark_rules(family, "BOX_LOCAL")?;
 
-        if self.config.network_mode != "enhance" && self.config.proxy_tcp {
+        if self.config.network_mode != crate::config::NetworkMode::Enhance && self.config.proxy_tcp
+        {
             self.ensure_rule_append(
                 family,
                 "mangle",

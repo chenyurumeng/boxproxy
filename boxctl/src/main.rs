@@ -1,3 +1,4 @@
+mod atomic_file;
 mod cli;
 mod config;
 mod control;
@@ -6,10 +7,10 @@ mod db;
 mod exec;
 mod logger;
 mod monitor;
+mod platform;
 mod resource;
 mod rules;
 mod service;
-mod wifi;
 
 use cli::{
     parse_args, print_version, CnipCommand, Command, ConfigCommand, ModeCommand, ResourceCommand,
@@ -49,21 +50,37 @@ fn run() -> Result<()> {
         Command::Down => control::down(&config, &runner),
         Command::Restart => control::restart(&config, &runner),
         Command::Status => control::status(&config, &runner),
-        Command::Service(ServiceCommand::Start) => service::start(&config, &runner),
-        Command::Service(ServiceCommand::Stop) => service::stop(&config, &runner),
-        Command::Service(ServiceCommand::Restart) => {
+        Command::Service(ServiceCommand::Start) => {
+            control::with_operation_lock(&config, || service::start(&config, &runner))
+        }
+        Command::Service(ServiceCommand::Stop) => {
+            control::with_operation_lock(&config, || service::stop(&config, &runner))
+        }
+        Command::Service(ServiceCommand::Restart) => control::with_operation_lock(&config, || {
             service::stop(&config, &runner)?;
             service::start(&config, &runner)
-        }
+        }),
         Command::Service(ServiceCommand::Status) => service::status(&config, &runner),
-        Command::Mode(ModeCommand::Apply) => rules::apply(&config, &runner),
-        Command::Mode(ModeCommand::Clear) => rules::clear(&config, &runner),
-        Command::Mode(ModeCommand::Renew) => rules::renew(&config, &runner),
-        Command::Config(ConfigCommand::Sync) => core_config::sync(&config),
-        Command::Resource(ResourceCommand::Apply) => resource::apply_current(&config, &runner),
-        Command::Cnip(CnipCommand::Reload) => rules::reload_cn_ipset(&config, &runner),
+        Command::Mode(ModeCommand::Apply) => {
+            control::with_operation_lock(&config, || rules::apply(&config, &runner))
+        }
+        Command::Mode(ModeCommand::Clear) => {
+            control::with_operation_lock(&config, || rules::clear(&config, &runner))
+        }
+        Command::Mode(ModeCommand::Renew) => {
+            control::with_operation_lock(&config, || rules::renew(&config, &runner))
+        }
+        Command::Config(ConfigCommand::Sync) => {
+            control::with_operation_lock(&config, || core_config::sync(&config))
+        }
+        Command::Resource(ResourceCommand::Apply) => {
+            control::with_operation_lock(&config, || resource::apply_current(&config, &runner))
+        }
+        Command::Cnip(CnipCommand::Reload) => {
+            control::with_operation_lock(&config, || rules::reload_cn_ipset(&config, &runner))
+        }
         Command::Monitor => monitor::run(&config, &runner),
         Command::MonitorStop => monitor::stop(&config, &runner),
-        Command::Wifi(WifiCommand::Apply) => wifi::apply(&config, &runner),
+        Command::Wifi(WifiCommand::Apply) => monitor::apply_wifi_policy(&config, &runner),
     }
 }

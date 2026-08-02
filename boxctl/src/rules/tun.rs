@@ -121,29 +121,6 @@ impl<'a> RuleManager<'a> {
         Ok(())
     }
 
-    pub(super) fn append_tun_force_proxy_destination_rules(
-        &self,
-        family: Family,
-        chain: &str,
-    ) -> Result<()> {
-        let cidrs = match family {
-            Family::V4 => &self.config.tun_force_proxy_cidrs,
-            Family::V6 => &self.config.tun_force_proxy_cidrs6,
-        };
-        for cidr in cidrs {
-            if cidr.trim().is_empty() {
-                continue;
-            }
-            self.append_mark_return(
-                family,
-                chain,
-                TUN_ROUTE_MARK,
-                vec!["-d".into(), cidr.clone()],
-            )?;
-        }
-        Ok(())
-    }
-
     pub(super) fn append_tun_bypass_destination_rules(
         &self,
         family: Family,

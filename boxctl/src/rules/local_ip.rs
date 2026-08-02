@@ -2,8 +2,8 @@ use super::*;
 
 impl<'a> RuleManager<'a> {
     pub(super) fn refresh_local_ip_rules(&self) -> Result<()> {
-        let need_mangle = mode_needs_local_ip_mangle(&self.config.network_mode);
-        let need_nat = mode_needs_local_ip_nat(&self.config.network_mode);
+        let need_mangle = mode_needs_local_ip_mangle(self.config.network_mode.as_str());
+        let need_nat = mode_needs_local_ip_nat(self.config.network_mode.as_str());
         if !need_mangle && !need_nat {
             return Ok(());
         }
@@ -59,7 +59,7 @@ impl<'a> RuleManager<'a> {
             logger::LogKey::LocalIpLoopRefreshed,
             &[logger::local_ip_loop_summary_arg("summary", &summaries)],
         );
-        self.save_local_ip_refresh_key(&refresh_key);
+        self.save_local_ip_refresh_key(&refresh_key)?;
         Ok(())
     }
 
@@ -150,7 +150,16 @@ impl<'a> RuleManager<'a> {
                 return;
             }
         }
-        let _ = fs::write(path, value);
+        if let Err(err) = fs::write(&path, value) {
+            logger::warn_key(
+                self.config,
+                LogKey::LocalIpLoopUpdateFailed,
+                &[arg(
+                    "error",
+                    format!("write IPv6 setting {} failed: {err}", path.display()),
+                )],
+            );
+        }
     }
 
     pub(super) fn ensure_local_ip_chain(&self, family: Family, table: &str) -> Result<()> {
@@ -336,9 +345,10 @@ impl<'a> RuleManager<'a> {
             .unwrap_or(false)
     }
 
-    pub(super) fn save_local_ip_refresh_key(&self, key: &str) {
-        let _ = fs::create_dir_all(&self.config.paths.state);
-        let _ = fs::write(self.local_ip_refresh_key_path(), key);
+    pub(super) fn save_local_ip_refresh_key(&self, key: &str) -> Result<()> {
+        let path = self.local_ip_refresh_key_path();
+        crate::atomic_file::write_atomic(&path, key.as_bytes(), None)
+            .map_err(|err| format!("save local IP refresh key {} failed: {err}", path.display()))
     }
 
     pub(super) fn local_ip_refresh_key(

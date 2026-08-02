@@ -26,7 +26,7 @@ pub(super) fn sync_mihomo(config: &Config) -> Result<()> {
         LogKey::CoreConfigSyncBegin,
         &[
             arg("core", "mihomo"),
-            arg("mode", &config.network_mode),
+            arg("mode", config.network_mode),
             arg("config", runtime.display()),
         ],
     );
@@ -194,12 +194,12 @@ fn sync_mihomo_value(runtime: &mut Value, settings: &MihomoSettings) -> Result<(
         .as_mapping_mut()
         .ok_or_else(|| "YAML config must contain a top-level mapping".to_string())?;
 
-    set_value(
+    set_default_value(
         root,
         "redir-port",
         yaml_port_value(&settings.redir_port, "7892"),
     );
-    set_value(
+    set_default_value(
         root,
         "tproxy-port",
         yaml_port_value(&settings.tproxy_port, "7893"),
@@ -238,16 +238,17 @@ struct MihomoSettings {
     fake_ip_range: String,
     fake_ip6_range: String,
     bypass_cn_ip: bool,
-    mac_filter: bool,
+    box_managed_tun_route: bool,
     selected_uids: Vec<String>,
+    gid_list: Vec<String>,
     blocked_interfaces: Vec<String>,
 }
 
 impl From<&Config> for MihomoSettings {
     fn from(config: &Config) -> Self {
         Self {
-            network_mode: config.network_mode.clone(),
-            proxy_mode: config.proxy_mode.clone(),
+            network_mode: config.network_mode.to_string(),
+            proxy_mode: config.proxy_mode.to_string(),
             redir_port: config.redir_port.clone(),
             tproxy_port: config.tproxy_port.clone(),
             mihomo_dns_port: config.mihomo_dns_port.clone(),
@@ -255,8 +256,9 @@ impl From<&Config> for MihomoSettings {
             fake_ip_range: config.fake_ip_range.clone(),
             fake_ip6_range: config.fake_ip6_range.clone(),
             bypass_cn_ip: config.bypass_cn_ip,
-            mac_filter: config.mac_filter,
+            box_managed_tun_route: tun_route_managed_by_box(config),
             selected_uids: config.selected_uids.clone(),
+            gid_list: config.gid_list.clone(),
             blocked_interfaces: config.blocked_interfaces.clone(),
         }
     }
@@ -275,17 +277,8 @@ impl MihomoSettings {
             )
     }
 
-    fn box_managed_tun_route(&self) -> bool {
-        self.network_mode == "tun" && (self.bypass_cn_ip || self.mac_filter)
-    }
-
     fn tun_uid_lists(&self) -> (Vec<String>, Vec<String>) {
-        let uids = normalized_text_values(&self.selected_uids);
-        match self.proxy_mode.as_str() {
-            "whitelist" | "white" => (uids, Vec::new()),
-            "blacklist" | "black" => (Vec::new(), uids),
-            _ => (Vec::new(), Vec::new()),
-        }
+        proxy_uid_lists(&self.proxy_mode, &self.selected_uids, &self.gid_list)
     }
 
     fn apply_dns(&self, dns: &mut Mapping) {
@@ -329,7 +322,7 @@ struct MihomoTunConfig {
 
 impl MihomoTunConfig {
     fn from(settings: &MihomoSettings, current_stack: Option<String>) -> Self {
-        let box_managed_route = settings.box_managed_tun_route();
+        let box_managed_route = settings.box_managed_tun_route;
         let (include_uid, exclude_uid) = settings.tun_uid_lists();
         Self {
             stack: if settings.bypass_cn_ip {
@@ -359,9 +352,9 @@ impl MihomoTunConfig {
 
     fn apply(&self, tun: &mut Mapping) {
         set_value(tun, "enable", Value::from(true));
-        set_value(tun, "mtu", Value::from(1500_u16));
-        set_value(tun, "device", Value::from(self.device.as_str()));
-        set_value(tun, "stack", Value::from(self.stack.as_str()));
+        set_default_value(tun, "mtu", Value::from(1500_u16));
+        set_default_value(tun, "device", Value::from(self.device.as_str()));
+        set_default_value(tun, "stack", Value::from(self.stack.as_str()));
         tun.entry(Value::from("dns-hijack")).or_insert_with(|| {
             Value::Sequence(vec![Value::from("any:53"), Value::from("tcp://any:53")])
         });
@@ -437,6 +430,12 @@ fn set_value(mapping: &mut Mapping, key: &str, value: Value) {
     mapping.insert(Value::from(key), value);
 }
 
+fn set_default_value(mapping: &mut Mapping, key: &str, value: Value) {
+    if matches!(mapping.get(key), None | Some(Value::Null)) {
+        set_value(mapping, key, value);
+    }
+}
+
 fn ensure_mapping<'a>(mapping: &'a mut Mapping, key: &str) -> Result<&'a mut Mapping> {
     mapping
         .entry(Value::from(key))
@@ -504,8 +503,9 @@ mod tests {
             fake_ip_range: "198.18.0.1/16".to_string(),
             fake_ip6_range: "fc00::/18".to_string(),
             bypass_cn_ip: false,
-            mac_filter: false,
+            box_managed_tun_route: false,
             selected_uids: Vec::new(),
+            gid_list: Vec::new(),
             blocked_interfaces: Vec::new(),
         };
 
@@ -513,8 +513,41 @@ mod tests {
 
         assert_eq!(runtime["proxy-groups"][0]["type"], Value::from("select"));
         assert_eq!(runtime["redir-port"], Value::from(9797_u16));
+        assert_eq!(runtime["tproxy-port"], Value::from(9898_u16));
         assert_eq!(runtime["dns"]["listen"], Value::from("0.0.0.0:1053"));
         assert_eq!(runtime["tun"]["device"], Value::from("meta"));
+        assert_eq!(runtime["tun"]["mtu"], Value::from(1500_u16));
+    }
+
+    #[test]
+    fn preserves_existing_inbound_ports_and_tun_transport_settings() {
+        let mut runtime: Value = serde_norway::from_str(
+            "redir-port: 19092\ntproxy-port: 19093\ntun:\n  device: custom-tun\n  mtu: 9000\n  stack: system\n",
+        )
+        .unwrap();
+        let settings = MihomoSettings {
+            network_mode: "tun".to_string(),
+            proxy_mode: "core".to_string(),
+            redir_port: "9797".to_string(),
+            tproxy_port: "9898".to_string(),
+            mihomo_dns_port: "1053".to_string(),
+            tun_device: "meta".to_string(),
+            fake_ip_range: "198.18.0.1/16".to_string(),
+            fake_ip6_range: String::new(),
+            bypass_cn_ip: false,
+            box_managed_tun_route: false,
+            selected_uids: Vec::new(),
+            gid_list: Vec::new(),
+            blocked_interfaces: Vec::new(),
+        };
+
+        sync_mihomo_value(&mut runtime, &settings).unwrap();
+
+        assert_eq!(runtime["redir-port"], Value::from(19092_u16));
+        assert_eq!(runtime["tproxy-port"], Value::from(19093_u16));
+        assert_eq!(runtime["tun"]["device"], Value::from("custom-tun"));
+        assert_eq!(runtime["tun"]["mtu"], Value::from(9000_u16));
+        assert_eq!(runtime["tun"]["stack"], Value::from("system"));
     }
 
     #[test]

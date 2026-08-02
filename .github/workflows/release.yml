@@ -80,9 +80,12 @@ jobs:
 
       - name: Set up Rust
         if: env.BUILD_BOXCTL == 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
+        uses: dtolnay/rust-toolchain@1.97.0
+
+      - name: Verify Android Rust target
+        if: env.BUILD_BOXCTL == 'true'
+        shell: bash
+        run: rustup target add "$TARGET" --toolchain 1.97.0
 
       - name: Build boxctl
         if: env.BUILD_BOXCTL == 'true'

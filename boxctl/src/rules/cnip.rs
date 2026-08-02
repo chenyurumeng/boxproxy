@@ -6,6 +6,61 @@ struct EbpfConfigFile {
     fingerprint: String,
 }
 
+fn read_cnip_entries(source: &PathBuf, family: &str) -> Result<Vec<String>> {
+    let file = fs::File::open(source)
+        .map_err(|err| format!("open CNIP file {} failed: {err}", source.display()))?;
+    let mut entries = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|err| format!("read CNIP line failed: {err}"))?;
+        let value = line.split('#').next().unwrap_or_default().trim();
+        if value.is_empty() {
+            continue;
+        }
+        let value = normalize_cnip_entry(value, family).ok_or_else(|| {
+            format!(
+                "invalid {family} CNIP entry at {}:{}: {value}",
+                source.display(),
+                index + 1
+            )
+        })?;
+        entries.push(value);
+    }
+    entries.sort();
+    entries.dedup();
+    Ok(entries)
+}
+
+fn normalize_cnip_entry(value: &str, family: &str) -> Option<String> {
+    match family {
+        "inet" => normalize_ipv4_cidr(value).or_else(|| {
+            value
+                .parse::<std::net::Ipv4Addr>()
+                .ok()
+                .map(|address| format!("{address}/32"))
+        }),
+        "inet6" => normalize_ipv6_cidr(value).or_else(|| {
+            value
+                .parse::<std::net::Ipv6Addr>()
+                .ok()
+                .map(|address| format!("{address}/128"))
+        }),
+        _ => None,
+    }
+}
+
+fn ipset_restore_input(name: &str, temporary: &str, family: &str, entries: &[String]) -> String {
+    let mut input = format!(
+        "create {name} hash:net family {family} hashsize 8192 maxelem 65536 -exist\n\
+         create {temporary} hash:net family {family} hashsize 8192 maxelem 65536 -exist\n\
+         flush {temporary}\n"
+    );
+    for entry in entries {
+        input.push_str(&format!("add {temporary} {entry}\n"));
+    }
+    input.push_str(&format!("swap {temporary} {name}\ndestroy {temporary}\n"));
+    input
+}
+
 impl<'a> RuleManager<'a> {
     pub(super) fn setup_cn_ipset_if_needed(&self, capabilities: &Capabilities) -> Result<()> {
         if !self.config.bypass_cn_ip {
@@ -20,7 +75,7 @@ impl<'a> RuleManager<'a> {
             logger::info_key(
                 self.config,
                 LogKey::CnipModeSkipIpset,
-                &[arg("mode", &self.config.cnip_mode)],
+                &[arg("mode", self.config.cnip_mode)],
             );
             return Ok(());
         }
@@ -73,30 +128,14 @@ impl<'a> RuleManager<'a> {
             return Ok(());
         }
 
-        let source_file = fs::File::open(source)
-            .map_err(|err| format!("open CNIP file {} failed: {err}", source.display()))?;
+        let entries = read_cnip_entries(source, family)?;
+        let temporary = format!("{name}_next");
         let args = strings(&["restore", "-exist"]);
-        let output = self
-            .runner
-            .run_with_stdin_writer("ipset", &args, move |stdin| {
-                writeln!(
-                    stdin,
-                    "create {name} hash:net family {family} hashsize 8192 maxelem 65536 -exist"
-                )
-                .map_err(|err| format!("write ipset header failed: {err}"))?;
-                writeln!(stdin, "flush {name}")
-                    .map_err(|err| format!("write ipset flush failed: {err}"))?;
-                for line in BufReader::new(source_file).lines() {
-                    let line = line.map_err(|err| format!("read CNIP line failed: {err}"))?;
-                    let value = line.trim();
-                    if value.is_empty() || value.starts_with('#') {
-                        continue;
-                    }
-                    writeln!(stdin, "add {name} {value}")
-                        .map_err(|err| format!("write ipset entry failed: {err}"))?;
-                }
-                Ok(())
-            })?;
+        let output = self.runner.run_with_stdin_output(
+            "ipset",
+            &args,
+            &ipset_restore_input(name, &temporary, family, &entries),
+        )?;
         if output.ok {
             self.write_ipset_stamp(name, source);
             logger::info_key(self.config, LogKey::CnipImported, &[arg("name", name)]);
@@ -244,8 +283,14 @@ impl<'a> RuleManager<'a> {
             .unwrap_or(false)
     }
 
-    fn save_ebpf_reload_fingerprint(&self, fingerprint: &str) {
-        let _ = fs::write(self.ebpf_reload_stamp_path(), fingerprint);
+    fn save_ebpf_reload_fingerprint(&self, fingerprint: &str) -> Result<()> {
+        let path = self.ebpf_reload_stamp_path();
+        crate::atomic_file::write_atomic(&path, fingerprint.as_bytes(), None).map_err(|err| {
+            format!(
+                "save eBPF reload fingerprint {} failed: {err}",
+                path.display()
+            )
+        })
     }
 
     pub(super) fn run_ebpf_matcher(
@@ -332,7 +377,7 @@ impl<'a> RuleManager<'a> {
                 self.run_ebpf_matcher("--clear", None, false)?;
                 match self.run_ebpf_matcher("--apply", Some(&config.path), cnip_required) {
                     Ok(()) => {
-                        self.save_ebpf_reload_fingerprint(&config.fingerprint);
+                        self.save_ebpf_reload_fingerprint(&config.fingerprint)?;
                         if cnip_required {
                             logger::info_key(self.config, LogKey::CnipEbpfLoaded, &[]);
                         }
@@ -347,7 +392,7 @@ impl<'a> RuleManager<'a> {
                 }
                 match self.run_ebpf_matcher("--update", Some(&config.path), true) {
                     Ok(()) => {
-                        self.save_ebpf_reload_fingerprint(&config.fingerprint);
+                        self.save_ebpf_reload_fingerprint(&config.fingerprint)?;
                         logger::info_key(self.config, LogKey::EbpfMapHotUpdated, &[]);
                         Ok(())
                     }
@@ -357,10 +402,8 @@ impl<'a> RuleManager<'a> {
                             LogKey::EbpfMapHotUpdateFailed,
                             &[arg("error", err)],
                         );
-                        self.run_ebpf_matcher("--apply", Some(&config.path), cnip_required)
-                            .map(|()| {
-                                self.save_ebpf_reload_fingerprint(&config.fingerprint);
-                            })
+                        self.run_ebpf_matcher("--apply", Some(&config.path), cnip_required)?;
+                        self.save_ebpf_reload_fingerprint(&config.fingerprint)
                     }
                 }
             }
@@ -503,11 +546,11 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn cnip_uses_ipset(&self) -> bool {
-        self.config.cnip_mode == "ipset"
+        self.config.cnip_mode == crate::config::CnipMode::Ipset
     }
 
     pub(super) fn cnip_uses_ebpf(&self) -> bool {
-        self.config.cnip_mode == "ebpf"
+        self.config.cnip_mode == crate::config::CnipMode::Ebpf
     }
 
     pub(super) fn ipset_available(&self) -> bool {
@@ -580,4 +623,37 @@ pub(super) fn ebpf_failure_reason(stderr: &str) -> Option<logger::EbpfFailureRea
         return Some(logger::EbpfFailureReason::PinnedPathUnavailable);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_cnip_entries_to_the_expected_family() {
+        assert_eq!(
+            normalize_cnip_entry("1.1.1.9/24", "inet"),
+            Some("1.1.1.0/24".to_string())
+        );
+        assert_eq!(
+            normalize_cnip_entry("1.1.1.1", "inet"),
+            Some("1.1.1.1/32".to_string())
+        );
+        assert_eq!(
+            normalize_cnip_entry("2001:db8::1", "inet6"),
+            Some("2001:db8::1/128".to_string())
+        );
+        assert_eq!(normalize_cnip_entry("1.1.1.1", "inet6"), None);
+        assert_eq!(normalize_cnip_entry("1.1.1.1 -j ACCEPT", "inet"), None);
+    }
+
+    #[test]
+    fn ipset_update_uses_a_temporary_set_and_swap() {
+        let input = ipset_restore_input("cnip", "cnip_next", "inet", &["1.1.1.0/24".to_string()]);
+
+        assert!(input.contains("flush cnip_next\n"));
+        assert!(input.contains("add cnip_next 1.1.1.0/24\n"));
+        assert!(input.contains("swap cnip_next cnip\n"));
+        assert!(!input.contains("flush cnip\n"));
+    }
 }
