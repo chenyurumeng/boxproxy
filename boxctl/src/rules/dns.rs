@@ -5,6 +5,14 @@ impl<'a> RuleManager<'a> {
         self.config.dns_hijack_mode == "redirect"
     }
 
+    pub(super) fn dns_mode_is_redirect_apps(&self) -> bool {
+        self.config.dns_hijack_mode == "redirect-apps"
+    }
+
+    pub(super) fn dns_mode_uses_redirect(&self) -> bool {
+        self.dns_mode_is_redirect() || self.dns_mode_is_redirect_apps()
+    }
+
     pub(super) fn dns_mode_is_disable(&self) -> bool {
         self.config.dns_hijack_mode == "disable"
     }
@@ -20,7 +28,7 @@ impl<'a> RuleManager<'a> {
     pub(super) fn dns_should_use_mihomo_forward(&self) -> bool {
         self.config.mihomo_dns_forward == "enable"
             && self.config.bin_name == "mihomo"
-            && !self.dns_mode_is_redirect()
+            && !self.dns_mode_uses_redirect()
             && !self.dns_mode_is_disable()
     }
 
@@ -38,7 +46,7 @@ impl<'a> RuleManager<'a> {
         family: Family,
         context: &RuleContext,
     ) -> Result<()> {
-        if !self.dns_mode_is_redirect() && !self.dns_should_use_mihomo_forward() {
+        if !self.dns_mode_uses_redirect() && !self.dns_should_use_mihomo_forward() {
             return Ok(());
         }
         if family == Family::V6 && !self.probe_capabilities().ip6_nat {
@@ -50,7 +58,7 @@ impl<'a> RuleManager<'a> {
             return Ok(());
         }
 
-        let kind = if self.dns_mode_is_redirect() {
+        let kind = if self.dns_mode_uses_redirect() {
             DnsNatKind::Hijack
         } else {
             DnsNatKind::Forward
@@ -72,10 +80,14 @@ impl<'a> RuleManager<'a> {
         let out_chain = dns_out_chain(family, kind);
         let port = self.dns_target_port();
 
-        self.ensure_chain(family, "nat", pre_chain)?;
         self.ensure_chain(family, "nat", out_chain)?;
 
-        self.append_dns_nat_rules(family, pre_chain, kind, &port, true)?;
+        if !self.dns_mode_is_redirect_apps() {
+            self.ensure_chain(family, "nat", pre_chain)?;
+            self.append_dns_nat_rules(family, pre_chain, kind, &port, true)?;
+            self.ensure_jump(family, "nat", "PREROUTING", pre_chain)?;
+        }
+
         if !self.add_core_bypass_rule(family, "nat", out_chain, "-I", context)
             && family == Family::V4
         {
@@ -85,9 +97,13 @@ impl<'a> RuleManager<'a> {
                 &[dns_target_arg(kind)],
             );
         }
-        self.append_dns_nat_rules(family, out_chain, kind, &port, false)?;
 
-        self.ensure_jump(family, "nat", "PREROUTING", pre_chain)?;
+        if self.dns_mode_is_redirect_apps() {
+            self.append_app_scoped_dns_nat_rules(family, out_chain, &port, context)?;
+        } else {
+            self.append_dns_nat_rules(family, out_chain, kind, &port, false)?;
+        }
+
         self.ensure_jump(family, "nat", "OUTPUT", out_chain)
     }
 
@@ -109,6 +125,100 @@ impl<'a> RuleManager<'a> {
         }
         self.append_dns_nat_rules(family, chain, DnsNatKind::Forward, &port, true)?;
         self.ensure_jump(family, "nat", "OUTPUT", chain)
+    }
+
+    pub(super) fn append_app_scoped_dns_nat_rules(
+        &self,
+        family: Family,
+        chain: &str,
+        port: &str,
+        context: &RuleContext,
+    ) -> Result<()> {
+        if !self.app_uid_ebpf_active(family, context) {
+            return Err(format!(
+                "{} app-scoped DNS hijack requires a loaded app UID eBPF matcher",
+                family_label(family)
+            ));
+        }
+
+        let append_redirect = |proto: &str, this: &Self| -> Result<()> {
+            let mut args = this.app_uid_match_args(
+                family,
+                vec!["-p".into(), proto.into(), "--dport".into(), "53".into()],
+            );
+            args.extend([
+                "-j".into(),
+                "REDIRECT".into(),
+                "--to-ports".into(),
+                port.into(),
+            ]);
+            this.ensure_rule_append_owned(family, "nat", chain, args)
+        };
+
+        let append_bypass = |proto: &str, this: &Self| -> Result<()> {
+            let mut args = this.app_uid_match_args(
+                family,
+                vec!["-p".into(), proto.into(), "--dport".into(), "53".into()],
+            );
+            args.extend(["-j".into(), "RETURN".into()]);
+            this.ensure_rule_append_owned(family, "nat", chain, args)
+        };
+
+        match self.config.proxy_mode.as_str() {
+            "whitelist" | "white" => {
+                if self.dns_tcp_enabled() {
+                    append_redirect("tcp", self)?;
+                }
+                if self.dns_udp_enabled() {
+                    append_redirect("udp", self)?;
+                }
+            }
+            "blacklist" | "black" => {
+                if self.dns_tcp_enabled() {
+                    append_bypass("tcp", self)?;
+                    self.ensure_rule_append(
+                        family,
+                        "nat",
+                        chain,
+                        &[
+                            "-p",
+                            "tcp",
+                            "--dport",
+                            "53",
+                            "-j",
+                            "REDIRECT",
+                            "--to-ports",
+                            port,
+                        ],
+                    )?;
+                }
+                if self.dns_udp_enabled() {
+                    append_bypass("udp", self)?;
+                    self.ensure_rule_append(
+                        family,
+                        "nat",
+                        chain,
+                        &[
+                            "-p",
+                            "udp",
+                            "--dport",
+                            "53",
+                            "-j",
+                            "REDIRECT",
+                            "--to-ports",
+                            port,
+                        ],
+                    )?;
+                }
+            }
+            mode => {
+                return Err(format!(
+                    "app-scoped DNS hijack requires whitelist or blacklist proxy mode, got {mode}"
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     pub(super) fn append_dns_nat_rules(
@@ -196,7 +306,7 @@ impl<'a> RuleManager<'a> {
         chain: &str,
         action: ProxyAction,
     ) -> Result<()> {
-        if self.dns_mode_is_redirect()
+        if self.dns_mode_uses_redirect()
             || self.dns_mode_is_disable()
             || self.dns_should_use_mihomo_forward()
         {
