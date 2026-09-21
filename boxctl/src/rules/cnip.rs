@@ -336,12 +336,14 @@ impl<'a> RuleManager<'a> {
     ) -> Result<()> {
         let cnip_required = self.cnip_ebpf_requested();
         let app_requested = self.app_uid_ebpf_requested(context);
+        let app_required = self.dns_mode_is_redirect_apps();
+        let matcher_required = cnip_required || app_required;
         if !cnip_required && !app_requested {
             return Ok(());
         }
 
         if !capabilities.bpf_match {
-            if !cnip_required {
+            if !matcher_required {
                 return Ok(());
             }
             let action = match mode {
@@ -353,7 +355,7 @@ impl<'a> RuleManager<'a> {
             ));
         }
         if !self.config.bpf_matcher_path.is_file() {
-            if !cnip_required {
+            if !matcher_required {
                 return Ok(());
             }
             return Err(format!(
@@ -375,7 +377,7 @@ impl<'a> RuleManager<'a> {
         match mode {
             EbpfApplyMode::Start => {
                 self.run_ebpf_matcher("--clear", None, false)?;
-                match self.run_ebpf_matcher("--apply", Some(&config.path), cnip_required) {
+                match self.run_ebpf_matcher("--apply", Some(&config.path), matcher_required) {
                     Ok(()) => {
                         self.save_ebpf_reload_fingerprint(&config.fingerprint)?;
                         if cnip_required {
@@ -402,7 +404,7 @@ impl<'a> RuleManager<'a> {
                             LogKey::EbpfMapHotUpdateFailed,
                             &[arg("error", err)],
                         );
-                        self.run_ebpf_matcher("--apply", Some(&config.path), cnip_required)?;
+                        self.run_ebpf_matcher("--apply", Some(&config.path), matcher_required)?;
                         self.save_ebpf_reload_fingerprint(&config.fingerprint)
                     }
                 }
@@ -523,7 +525,7 @@ impl<'a> RuleManager<'a> {
     }
 
     pub(super) fn app_uid_ebpf_requested(&self, context: &RuleContext) -> bool {
-        self.config.performance_mode
+        (self.config.performance_mode || self.dns_mode_is_redirect_apps())
             && !context.selected_uids.is_empty()
             && matches!(
                 self.config.proxy_mode.as_str(),
