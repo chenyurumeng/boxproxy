@@ -158,12 +158,7 @@ impl<'a> RuleManager<'a> {
         let append_bypass = |proto: &str, this: &Self| -> Result<()> {
             let mut args = this.app_uid_match_args(
                 family,
-                vec![
-                    "-p".into(),
-                    proto.into(),
-                    "--dport".into(),
-                    "53".into(),
-                ],
+                vec!["-p".into(), proto.into(), "--dport".into(), "53".into()],
             );
             args.extend(["-j".into(), "RETURN".into()]);
             this.ensure_rule_append_owned(family, "nat", chain, args)
