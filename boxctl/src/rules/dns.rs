@@ -144,12 +144,7 @@ impl<'a> RuleManager<'a> {
         let append_redirect = |proto: &str, this: &Self| -> Result<()> {
             let mut args = this.app_uid_match_args(
                 family,
-                vec![
-                    "-p".into(),
-                    proto.into(),
-                    "--dport".into(),
-                    "53".into(),
-                ],
+                vec!["-p".into(), proto.into(), "--dport".into(), "53".into()],
             );
             args.extend([
                 "-j".into(),
