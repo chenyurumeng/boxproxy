@@ -401,7 +401,7 @@ impl Config {
         self.dns_hijack_mode = normalize_choice(
             "DNS hijack mode",
             &self.dns_hijack_mode,
-            &["disable", "tproxy", "redirect"],
+            &["disable", "tproxy", "redirect", "redirect-apps"],
         )?;
         self.quic = normalize_choice("QUIC mode", &self.quic, &["enable", "disable"])?;
         self.mihomo_dns_forward = normalize_choice(
@@ -433,6 +433,25 @@ impl Config {
         self.selected_uids = normalize_numeric_list(&self.selected_uids);
         self.gid_list = normalize_numeric_list(&self.gid_list);
         self.cnip_force_uids = normalize_numeric_list(&self.cnip_force_uids);
+
+        if self.dns_hijack_mode == "redirect-apps" {
+            if self.selected_uids.is_empty() {
+                return Err(
+                    "DNS hijack mode redirect-apps requires at least one selected application UID"
+                        .to_string(),
+                );
+            }
+            if !matches!(
+                self.proxy_mode.as_str(),
+                "whitelist" | "white" | "blacklist" | "black"
+            ) {
+                return Err(format!(
+                    "DNS hijack mode redirect-apps requires whitelist or blacklist proxy mode, got {}",
+                    self.proxy_mode.as_str()
+                ));
+            }
+        }
+
         Ok(())
     }
 }
