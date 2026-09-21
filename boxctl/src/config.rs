@@ -450,6 +450,15 @@ impl Config {
                     self.proxy_mode.as_str()
                 ));
             }
+            if matches!(
+                self.network_mode,
+                NetworkMode::Tun | NetworkMode::Ebpf
+            ) {
+                return Err(format!(
+                    "DNS hijack mode redirect-apps is not supported with network mode {} yet",
+                    self.network_mode.as_str()
+                ));
+            }
         }
 
         Ok(())
